@@ -1,0 +1,23 @@
+services:
+  dashboard:
+    build: .
+    container_name: netwatchai
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+
+  # Optional: Run live packet capture (requires elevated privileges)
+  # Uncomment and run: docker compose up capture
+  # capture:
+  #   build: .
+  #   container_name: netwatchai-capture
+  #   network_mode: host
+  #   cap_add:
+  #     - NET_ADMIN
+  #     - NET_RAW
+  #   volumes:
+  #     - ./data:/app/data
+  #   command: ["python", "capture.py", "--count", "0", "--detect"]
+  #   restart: unless-stopped
