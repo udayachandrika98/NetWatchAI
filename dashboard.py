@@ -198,99 +198,119 @@ if "authenticated" not in st.session_state:
 
 if not st.session_state.authenticated:
     st.markdown("""
-    <div style="text-align:center; padding:4rem 0;">
-        <h1 style="color:#00d4ff;">🛡️ NetWatchAI</h1>
-        <p style="color:#a0aec0;">AI-Powered Network Monitoring & Intrusion Detection</p>
+    <div style="text-align:center; padding:3rem 0 1rem 0;">
+        <div style="font-size:3.5rem; margin-bottom:0.5rem;">🛡️</div>
+        <h1 style="color:#4f46e5; margin:0; font-size:2.2rem; font-weight:800;">NetWatchAI</h1>
+        <p style="color:#64748b; margin:0.5rem 0 0 0; font-size:1.05rem;">AI-Powered Network Monitoring & Intrusion Detection</p>
     </div>
     """, unsafe_allow_html=True)
-    col1, col2, col3 = st.columns([1, 1, 1])
+    col1, col2, col3 = st.columns([1.2, 1, 1.2])
     with col2:
-        password = st.text_input("Enter password to continue", type="password")
-        if st.button("Login", use_container_width=True):
+        st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
+        password = st.text_input("Password", type="password", placeholder="Enter your password")
+        st.markdown("<div style='height:0.3rem'></div>", unsafe_allow_html=True)
+        if st.button("Sign In", use_container_width=True, type="primary"):
             if password == VALID_PASSWORD:
                 st.session_state.authenticated = True
                 st.rerun()
             else:
-                st.error("Wrong password")
+                st.error("Incorrect password. Please try again.")
     st.stop()
 
-# Custom CSS for dark-themed professional look
+# Custom CSS for clean, modern look
 st.markdown("""
 <style>
-    /* Dark header banner */
+    /* Header banner */
     .main-header {
-        background: linear-gradient(135deg, #0f0c29, #302b63, #24243e);
+        background: linear-gradient(135deg, #4f46e5, #7c3aed, #6366f1);
         padding: 1.5rem 2rem;
-        border-radius: 12px;
+        border-radius: 16px;
         margin-bottom: 1.5rem;
         color: white;
+        box-shadow: 0 4px 15px rgba(79, 70, 229, 0.3);
     }
-    .main-header h1 { color: #00d4ff; margin: 0; font-size: 2rem; }
-    .main-header p { color: #a0aec0; margin: 0.3rem 0 0 0; font-size: 1rem; }
+    .main-header h1 { color: #ffffff; margin: 0; font-size: 2rem; font-weight: 800; }
+    .main-header p { color: #e0e7ff; margin: 0.3rem 0 0 0; font-size: 1rem; }
 
     /* Metric cards */
     .metric-card {
-        background: linear-gradient(135deg, #1a1a2e, #16213e);
-        border-radius: 12px;
-        padding: 1.2rem;
+        background: #ffffff;
+        border-radius: 16px;
+        padding: 1.3rem;
         text-align: center;
-        border: 1px solid #2d3748;
-        transition: transform 0.2s;
+        border: 1px solid #e2e8f0;
+        transition: transform 0.2s, box-shadow 0.2s;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.06);
     }
-    .metric-card:hover { transform: translateY(-2px); }
-    .metric-card .label { color: #a0aec0; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 1px; }
-    .metric-card .value { font-size: 2rem; font-weight: 700; margin: 0.3rem 0; }
-    .metric-card.blue .value { color: #00d4ff; }
-    .metric-card.green .value { color: #2ecc71; }
-    .metric-card.red .value { color: #e74c3c; }
-    .metric-card.orange .value { color: #f39c12; }
+    .metric-card:hover { transform: translateY(-3px); box-shadow: 0 8px 25px rgba(0,0,0,0.1); }
+    .metric-card .label { color: #64748b; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1.2px; font-weight: 600; }
+    .metric-card .value { font-size: 2.2rem; font-weight: 800; margin: 0.3rem 0; }
+    .metric-card.blue .value { color: #4f46e5; }
+    .metric-card.green .value { color: #10b981; }
+    .metric-card.red .value { color: #ef4444; }
+    .metric-card.orange .value { color: #f59e0b; }
 
     /* Threat level bar */
     .threat-bar {
-        background: #1a1a2e;
-        border-radius: 10px;
+        background: #ffffff;
+        border-radius: 12px;
         padding: 1rem 1.5rem;
         margin-bottom: 1rem;
-        border: 1px solid #2d3748;
+        border: 1px solid #e2e8f0;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.06);
     }
-    .threat-label { font-size: 0.85rem; color: #a0aec0; text-transform: uppercase; letter-spacing: 1px; }
+    .threat-label { font-size: 0.8rem; color: #64748b; text-transform: uppercase; letter-spacing: 1.2px; font-weight: 600; }
     .threat-level { font-size: 1.3rem; font-weight: 700; }
-    .threat-low { color: #2ecc71; }
-    .threat-medium { color: #f39c12; }
-    .threat-high { color: #e67e22; }
-    .threat-critical { color: #e74c3c; }
+    .threat-low { color: #10b981; }
+    .threat-medium { color: #f59e0b; }
+    .threat-high { color: #f97316; }
+    .threat-critical { color: #ef4444; }
 
     /* Status badges */
-    .badge-normal { background: #2ecc71; color: white; padding: 2px 10px; border-radius: 12px; font-size: 0.8rem; font-weight: 600; }
-    .badge-anomaly { background: #e74c3c; color: white; padding: 2px 10px; border-radius: 12px; font-size: 0.8rem; font-weight: 600; }
+    .badge-normal { background: #d1fae5; color: #065f46; padding: 3px 12px; border-radius: 20px; font-size: 0.8rem; font-weight: 600; }
+    .badge-anomaly { background: #fee2e2; color: #991b1b; padding: 3px 12px; border-radius: 20px; font-size: 0.8rem; font-weight: 600; }
 
     /* Sidebar styling */
-    [data-testid="stSidebar"] { background: linear-gradient(180deg, #0f0c29, #1a1a2e); }
-    [data-testid="stSidebar"] .stMarkdown p { color: #cbd5e0; }
-    [data-testid="stSidebar"] h2 { color: #00d4ff; }
+    [data-testid="stSidebar"] { background: #f1f5f9; }
+    [data-testid="stSidebar"] .stMarkdown p { color: #475569; }
+    [data-testid="stSidebar"] h2 { color: #4f46e5; font-weight: 700; }
 
     /* Tab styling */
     .stTabs [data-baseweb="tab-list"] { gap: 8px; }
     .stTabs [data-baseweb="tab"] {
-        background: #1a1a2e;
-        border-radius: 8px;
+        background: #ffffff;
+        border-radius: 10px;
         padding: 8px 16px;
-        color: #a0aec0;
-        border: 1px solid #2d3748;
+        color: #64748b;
+        border: 1px solid #e2e8f0;
+        font-weight: 500;
     }
     .stTabs [aria-selected="true"] {
-        background: linear-gradient(135deg, #302b63, #24243e);
-        color: #00d4ff;
-        border-color: #00d4ff;
+        background: #eef2ff;
+        color: #4f46e5;
+        border-color: #4f46e5;
+        font-weight: 600;
     }
+
+    /* Network info cards */
+    .net-info-card {
+        background: #ffffff;
+        padding: 0.7rem 1rem;
+        border-radius: 10px;
+        margin-bottom: 0.5rem;
+        border: 1px solid #e2e8f0;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+    }
+    .net-info-card .info-label { color: #64748b; font-size: 0.8rem; font-weight: 500; }
+    .net-info-card .info-value { color: #4f46e5; font-size: 1.1rem; font-weight: 600; }
 
     /* Footer */
     .footer {
         text-align: center;
-        color: #4a5568;
-        padding: 1rem;
+        color: #94a3b8;
+        padding: 1.5rem;
         font-size: 0.85rem;
-        border-top: 1px solid #2d3748;
+        border-top: 1px solid #e2e8f0;
         margin-top: 2rem;
     }
 </style>
@@ -303,7 +323,7 @@ st.markdown("""
 st.markdown("""
 <div class="main-header">
     <h1>🛡️ NetWatchAI</h1>
-    <p>AI-Powered Network Monitoring & Intrusion Detection System</p>
+    <p>AI-Powered Network Monitoring & Intrusion Detection</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -496,7 +516,7 @@ with tab2:
             attack_counts.columns = ["Attack Type", "Count"]
             fig_attack = px.pie(
                 attack_counts, values="Count", names="Attack Type",
-                color_discrete_sequence=["#e74c3c", "#f39c12", "#e67e22", "#9b59b6", "#3498db", "#1abc9c"],
+                color_discrete_sequence=["#ef4444", "#f59e0b", "#f97316", "#8b5cf6", "#4f46e5", "#10b981"],
                 hole=0.4,
             )
             fig_attack.update_layout(
@@ -551,13 +571,13 @@ with tab3:
 
         fig_attackers = px.bar(
             top_src, x="Anomaly Count", y="Source IP",
-            orientation="h", color="Anomaly Count", color_continuous_scale="Reds",
+            orientation="h", color="Anomaly Count", color_continuous_scale="Purples",
         )
         fig_attackers.update_layout(
             margin=dict(t=20, b=20, l=20, r=20),
             yaxis=dict(autorange="reversed"), showlegend=False,
             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-            font_color="#a0aec0",
+            font_color="#475569",
         )
         st.plotly_chart(fig_attackers, use_container_width=True)
     else:
@@ -581,7 +601,7 @@ with tab4:
 
             fig_timeline = px.area(
                 timeline_grouped, x="time_bucket", y="count", color="status",
-                color_discrete_map={"Normal": "#2ecc71", "ANOMALY": "#e74c3c", "Unknown": "#95a5a6"},
+                color_discrete_map={"Normal": "#10b981", "ANOMALY": "#ef4444", "Unknown": "#94a3b8"},
                 labels={"time_bucket": "Time", "count": "Packets", "status": "Status"},
             )
             fig_timeline.update_layout(
@@ -597,7 +617,7 @@ with tab4:
                 anomaly_by_type = anomaly_timeline.groupby(["time_bucket", "attack_type"]).size().reset_index(name="count")
                 fig_attack_timeline = px.bar(
                     anomaly_by_type, x="time_bucket", y="count", color="attack_type",
-                    color_discrete_sequence=["#e74c3c", "#f39c12", "#e67e22", "#9b59b6", "#3498db", "#1abc9c"],
+                    color_discrete_sequence=["#ef4444", "#f59e0b", "#f97316", "#8b5cf6", "#4f46e5", "#10b981"],
                     labels={"time_bucket": "Time", "count": "Attacks", "attack_type": "Attack Type"},
                 )
                 fig_attack_timeline.update_layout(
@@ -620,13 +640,13 @@ with tab5:
         protocol_counts.columns = ["Protocol", "Count"]
         fig_proto = px.pie(
             protocol_counts, values="Count", names="Protocol",
-            color_discrete_sequence=["#3498db", "#2ecc71", "#f39c12", "#9b59b6"],
+            color_discrete_sequence=["#4f46e5", "#10b981", "#f59e0b", "#8b5cf6"],
             hole=0.4,
         )
         fig_proto.update_layout(
             margin=dict(t=20, b=20, l=20, r=20),
             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-            font_color="#a0aec0",
+            font_color="#475569",
         )
         st.plotly_chart(fig_proto, use_container_width=True)
 
@@ -636,19 +656,19 @@ with tab5:
         status_counts.columns = ["Status", "Count"]
         fig_status = px.bar(
             status_counts, x="Status", y="Count", color="Status",
-            color_discrete_map={"Normal": "#2ecc71", "ANOMALY": "#e74c3c", "Unknown": "#95a5a6"},
+            color_discrete_map={"Normal": "#10b981", "ANOMALY": "#ef4444", "Unknown": "#94a3b8"},
         )
         fig_status.update_layout(
             margin=dict(t=20, b=20, l=20, r=20), showlegend=False,
             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-            font_color="#a0aec0",
+            font_color="#475569",
         )
         st.plotly_chart(fig_status, use_container_width=True)
 
     st.markdown("**Packet Size Distribution**")
     fig_size = px.histogram(
         df, x="packet_size", color="status", nbins=30,
-        color_discrete_map={"Normal": "#2ecc71", "ANOMALY": "#e74c3c", "Unknown": "#95a5a6"},
+        color_discrete_map={"Normal": "#10b981", "ANOMALY": "#ef4444", "Unknown": "#94a3b8"},
         labels={"packet_size": "Packet Size (bytes)", "status": "Status"},
     )
     fig_size.update_layout(
@@ -672,9 +692,9 @@ with tab6:
         for key, val in wifi_data.items():
             safe_val = html_module.escape(str(val))
             st.markdown(f"""
-            <div style="background:#1a1a2e; padding:0.6rem 1rem; border-radius:8px; margin-bottom:0.5rem; border:1px solid #2d3748;">
-                <span style="color:#a0aec0; font-size:0.8rem;">{key}</span><br>
-                <span style="color:#00d4ff; font-size:1.1rem; font-weight:600;">{safe_val}</span>
+            <div class="net-info-card">
+                <span class="info-label">{key}</span><br>
+                <span class="info-value">{safe_val}</span>
             </div>""", unsafe_allow_html=True)
 
     with info_col2:
@@ -684,9 +704,9 @@ with tab6:
         for key, val in ip_data.items():
             safe_val = html_module.escape(str(val))
             st.markdown(f"""
-            <div style="background:#1a1a2e; padding:0.6rem 1rem; border-radius:8px; margin-bottom:0.5rem; border:1px solid #2d3748;">
-                <span style="color:#a0aec0; font-size:0.8rem;">{key}</span><br>
-                <span style="color:#00d4ff; font-size:1.1rem; font-weight:600;">{safe_val}</span>
+            <div class="net-info-card">
+                <span class="info-label">{key}</span><br>
+                <span class="info-value">{safe_val}</span>
             </div>""", unsafe_allow_html=True)
 
     # Signal strength gauge
@@ -698,16 +718,16 @@ with tab6:
         fig_gauge = go.Figure(go.Indicator(
             mode="gauge+number",
             value=gauge_val,
-            title={"text": "WiFi Signal Quality", "font": {"color": "#a0aec0"}},
-            number={"suffix": "%", "font": {"color": "#00d4ff"}},
+            title={"text": "WiFi Signal Quality", "font": {"color": "#475569"}},
+            number={"suffix": "%", "font": {"color": "#4f46e5"}},
             gauge={
-                "axis": {"range": [0, 100], "tickcolor": "#a0aec0"},
-                "bar": {"color": "#00d4ff"},
-                "bgcolor": "#1a1a2e",
+                "axis": {"range": [0, 100], "tickcolor": "#94a3b8"},
+                "bar": {"color": "#4f46e5"},
+                "bgcolor": "#f1f5f9",
                 "steps": [
-                    {"range": [0, 30], "color": "#e74c3c"},
-                    {"range": [30, 60], "color": "#f39c12"},
-                    {"range": [60, 100], "color": "#2ecc71"},
+                    {"range": [0, 30], "color": "#fee2e2"},
+                    {"range": [30, 60], "color": "#fef3c7"},
+                    {"range": [60, 100], "color": "#d1fae5"},
                 ],
             },
         ))
@@ -715,7 +735,7 @@ with tab6:
             height=250,
             margin=dict(t=40, b=20, l=40, r=40),
             paper_bgcolor="rgba(0,0,0,0)",
-            font_color="#a0aec0",
+            font_color="#475569",
         )
         st.plotly_chart(fig_gauge, use_container_width=True)
 
