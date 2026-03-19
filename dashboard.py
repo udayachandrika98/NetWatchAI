@@ -150,7 +150,6 @@ if not st.session_state.authenticated:
             font-size: 4rem;
             animation: float 3s ease-in-out infinite;
             display: inline-block;
-            filter: drop-shadow(0 0 20px rgba(0,229,255,0.5));
         }
         .login-brand {
             font-size: 2.5rem; font-weight: 900;
@@ -228,7 +227,6 @@ st.markdown("""
     @keyframes scan { 0%{transform:translateX(-100%)} 100%{transform:translateX(100%)} }
     .cyber-header h1 {
         color: #fff; font-size: 1.8rem; font-weight: 900; margin: 0;
-        text-shadow: 0 0 20px rgba(0,229,255,0.3);
     }
     .cyber-header .header-sub { color: #94a3b8; font-size: 0.9rem; margin: 0.2rem 0 0; }
     .header-badge {
@@ -243,54 +241,32 @@ st.markdown("""
     /* ── Metric cards ── */
     .mc {
         background: rgba(15,23,42,0.6);
-        backdrop-filter: blur(12px);
         border: 1px solid rgba(255,255,255,0.06);
-        border-radius: 16px;
-        padding: 1.2rem 1.4rem;
-        position: relative;
-        overflow: hidden;
-        transition: all 0.3s ease;
-    }
-    .mc:hover {
-        transform: translateY(-4px);
-        border-color: rgba(0,229,255,0.3);
-        box-shadow: 0 8px 30px rgba(0,229,255,0.1);
-    }
-    .mc::after {
-        content: '';
-        position: absolute; bottom: 0; left: 0; right: 0;
-        height: 3px; border-radius: 0 0 16px 16px;
-    }
-    .mc .mc-icon {
-        font-size: 1.8rem;
-        margin-bottom: 0.5rem;
-        filter: drop-shadow(0 0 8px currentColor);
+        border-radius: 12px;
+        padding: 0.8rem 1rem;
+        border-left: 3px solid;
     }
     .mc .mc-label {
-        color: #64748b; font-size: 0.7rem; font-weight: 600;
+        color: #64748b; font-size: 0.65rem; font-weight: 600;
         text-transform: uppercase; letter-spacing: 1.5px;
     }
     .mc .mc-val {
-        font-size: 2.2rem; font-weight: 900; margin: 0.2rem 0 0;
-        letter-spacing: -1px;
+        font-size: 1.8rem; font-weight: 800; margin: 0.1rem 0 0;
+        letter-spacing: -0.5px;
     }
-    .mc .mc-sub { color: #475569; font-size: 0.75rem; margin-top: 0.2rem; }
+    .mc .mc-sub { color: #475569; font-size: 0.7rem; }
 
-    .mc-cyan .mc-icon { color: #00e5ff; }
-    .mc-cyan .mc-val { color: #00e5ff; text-shadow: 0 0 20px rgba(0,229,255,0.3); }
-    .mc-cyan::after { background: linear-gradient(90deg, #00e5ff, transparent); }
+    .mc-cyan { border-left-color: #00e5ff; }
+    .mc-cyan .mc-val { color: #00e5ff; }
 
-    .mc-green .mc-icon { color: #34d399; }
-    .mc-green .mc-val { color: #34d399; text-shadow: 0 0 20px rgba(52,211,153,0.3); }
-    .mc-green::after { background: linear-gradient(90deg, #34d399, transparent); }
+    .mc-green { border-left-color: #34d399; }
+    .mc-green .mc-val { color: #34d399; }
 
-    .mc-red .mc-icon { color: #f87171; }
-    .mc-red .mc-val { color: #f87171; text-shadow: 0 0 20px rgba(248,113,113,0.3); }
-    .mc-red::after { background: linear-gradient(90deg, #f87171, transparent); }
+    .mc-red { border-left-color: #f87171; }
+    .mc-red .mc-val { color: #f87171; }
 
-    .mc-amber .mc-icon { color: #fbbf24; }
-    .mc-amber .mc-val { color: #fbbf24; text-shadow: 0 0 20px rgba(251,191,36,0.3); }
-    .mc-amber::after { background: linear-gradient(90deg, #fbbf24, transparent); }
+    .mc-amber { border-left-color: #fbbf24; }
+    .mc-amber .mc-val { color: #fbbf24; }
 
     /* ── Threat bar ── */
     .threat-bar {
@@ -354,7 +330,7 @@ st.markdown("""
         background: linear-gradient(135deg, rgba(52,211,153,0.1), rgba(16,185,129,0.05));
         border: 1px solid rgba(52,211,153,0.25);
     }
-    .ab-icon { font-size: 1.8rem; filter: drop-shadow(0 0 10px currentColor); }
+    .ab-icon { font-size: 1.4rem; }
     .ab-danger .ab-icon { color: #f87171; }
     .ab-safe .ab-icon { color: #34d399; }
     .ab-title { font-weight: 700; color: #e2e8f0; font-size: 1rem; }
@@ -367,7 +343,6 @@ st.markdown("""
     }
     .sec-dot {
         width: 8px; height: 8px; border-radius: 50%;
-        box-shadow: 0 0 8px currentColor;
     }
     .sec-h h3 { margin: 0; font-size: 1rem; font-weight: 700; color: #e2e8f0; }
 
@@ -546,38 +521,32 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
+unique_attacks = df[df["prediction"]==-1]["attack_type"].nunique()
 col1, col2, col3, col4 = st.columns(4)
 with col1:
     st.markdown(f"""<div class="mc mc-cyan">
-        <div class="mc-icon">📊</div>
         <div class="mc-label">Total Packets</div>
         <div class="mc-val">{total_packets:,}</div>
-        <div class="mc-sub">All captured traffic</div>
     </div>""", unsafe_allow_html=True)
 with col2:
     st.markdown(f"""<div class="mc mc-green">
-        <div class="mc-icon">✅</div>
         <div class="mc-label">Normal</div>
         <div class="mc-val">{n_normal:,}</div>
-        <div class="mc-sub">{normal_pct:.1f}% safe traffic</div>
+        <div class="mc-sub">{normal_pct:.1f}%</div>
     </div>""", unsafe_allow_html=True)
 with col3:
     st.markdown(f"""<div class="mc mc-red">
-        <div class="mc-icon">🚨</div>
         <div class="mc-label">Anomalies</div>
         <div class="mc-val">{n_anomalies:,}</div>
-        <div class="mc-sub">{anomaly_pct:.1f}% suspicious</div>
+        <div class="mc-sub">{anomaly_pct:.1f}%</div>
     </div>""", unsafe_allow_html=True)
 with col4:
-    unique_attacks = df[df["prediction"]==-1]["attack_type"].nunique()
     st.markdown(f"""<div class="mc mc-amber">
-        <div class="mc-icon">🎯</div>
         <div class="mc-label">Attack Types</div>
         <div class="mc-val">{unique_attacks}</div>
-        <div class="mc-sub">Unique threat patterns</div>
     </div>""", unsafe_allow_html=True)
 
-st.markdown("<div style='height:0.8rem'></div>", unsafe_allow_html=True)
+st.markdown("<div style='height:0.5rem'></div>", unsafe_allow_html=True)
 
 anomaly_df = df[df["prediction"] == -1]
 
