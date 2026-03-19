@@ -590,14 +590,21 @@ FONT = "#94a3b8"
 BG = "rgba(0,0,0,0)"
 
 def chart_layout(fig, **kwargs):
-    fig.update_layout(
+    grid = "rgba(255,255,255,0.04)"
+    defaults = dict(
         paper_bgcolor=BG, plot_bgcolor=BG, font_color=FONT,
         margin=dict(t=10, b=10, l=10, r=10),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(size=11)),
-        xaxis=dict(gridcolor="rgba(255,255,255,0.04)", zerolinecolor="rgba(255,255,255,0.04)"),
-        yaxis=dict(gridcolor="rgba(255,255,255,0.04)", zerolinecolor="rgba(255,255,255,0.04)"),
-        **kwargs,
+        xaxis=dict(gridcolor=grid, zerolinecolor=grid),
+        yaxis=dict(gridcolor=grid, zerolinecolor=grid),
     )
+    # Merge kwargs into defaults (kwargs wins on conflict)
+    for key, val in kwargs.items():
+        if key in defaults and isinstance(defaults[key], dict) and isinstance(val, dict):
+            defaults[key].update(val)
+        else:
+            defaults[key] = val
+    fig.update_layout(**defaults)
     return fig
 
 # ──────────────────────────────────────────────
