@@ -238,10 +238,10 @@ class TestSidebarFilterSafety:
         protocols = ["All"] + sorted(df["protocol"].dropna().unique().tolist())
         assert protocols == ["All", "ICMP", "TCP", "UDP"]
 
-    def test_attack_type_filter_excludes_normal(self):
-        """Attack type filter should exclude 'Normal' from the dropdown."""
+    def test_attack_type_filter_includes_normal(self):
+        """Attack type filter should include 'Normal' in the dropdown."""
         attack_types_col = pd.Series(["Normal", "Port Scan", "Normal", "DNS Anomaly"])
-        attack_types = ["All"] + sorted([t for t in attack_types_col.unique() if t != "Normal"])
-        assert "Normal" not in attack_types
+        attack_types = ["All"] + sorted(attack_types_col.dropna().unique().tolist())
+        assert "Normal" in attack_types
         assert "Port Scan" in attack_types
         assert "DNS Anomaly" in attack_types
