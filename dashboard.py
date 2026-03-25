@@ -150,6 +150,7 @@ if not st.session_state.authenticated:
             font-size: 4rem;
             animation: float 3s ease-in-out infinite;
             display: inline-block;
+            filter: drop-shadow(0 0 20px rgba(0,229,255,0.5));
         }
         .login-brand {
             font-size: 2.5rem; font-weight: 900;
@@ -227,6 +228,7 @@ st.markdown("""
     @keyframes scan { 0%{transform:translateX(-100%)} 100%{transform:translateX(100%)} }
     .cyber-header h1 {
         color: #fff; font-size: 1.8rem; font-weight: 900; margin: 0;
+        text-shadow: 0 0 20px rgba(0,229,255,0.3);
     }
     .cyber-header .header-sub { color: #94a3b8; font-size: 0.9rem; margin: 0.2rem 0 0; }
     .header-badge {
@@ -241,32 +243,54 @@ st.markdown("""
     /* ── Metric cards ── */
     .mc {
         background: rgba(15,23,42,0.6);
+        backdrop-filter: blur(12px);
         border: 1px solid rgba(255,255,255,0.06);
-        border-radius: 12px;
-        padding: 0.8rem 1rem;
-        border-left: 3px solid;
+        border-radius: 16px;
+        padding: 1.2rem 1.4rem;
+        position: relative;
+        overflow: hidden;
+        transition: all 0.3s ease;
+    }
+    .mc:hover {
+        transform: translateY(-4px);
+        border-color: rgba(0,229,255,0.3);
+        box-shadow: 0 8px 30px rgba(0,229,255,0.1);
+    }
+    .mc::after {
+        content: '';
+        position: absolute; bottom: 0; left: 0; right: 0;
+        height: 3px; border-radius: 0 0 16px 16px;
+    }
+    .mc .mc-icon {
+        font-size: 1.8rem;
+        margin-bottom: 0.5rem;
+        filter: drop-shadow(0 0 8px currentColor);
     }
     .mc .mc-label {
-        color: #64748b; font-size: 0.65rem; font-weight: 600;
+        color: #64748b; font-size: 0.7rem; font-weight: 600;
         text-transform: uppercase; letter-spacing: 1.5px;
     }
     .mc .mc-val {
-        font-size: 1.8rem; font-weight: 800; margin: 0.1rem 0 0;
-        letter-spacing: -0.5px;
+        font-size: 2.2rem; font-weight: 900; margin: 0.2rem 0 0;
+        letter-spacing: -1px;
     }
-    .mc .mc-sub { color: #475569; font-size: 0.7rem; }
+    .mc .mc-sub { color: #475569; font-size: 0.75rem; margin-top: 0.2rem; }
 
-    .mc-cyan { border-left-color: #00e5ff; }
-    .mc-cyan .mc-val { color: #00e5ff; }
+    .mc-cyan .mc-icon { color: #00e5ff; }
+    .mc-cyan .mc-val { color: #00e5ff; text-shadow: 0 0 20px rgba(0,229,255,0.3); }
+    .mc-cyan::after { background: linear-gradient(90deg, #00e5ff, transparent); }
 
-    .mc-green { border-left-color: #34d399; }
-    .mc-green .mc-val { color: #34d399; }
+    .mc-green .mc-icon { color: #34d399; }
+    .mc-green .mc-val { color: #34d399; text-shadow: 0 0 20px rgba(52,211,153,0.3); }
+    .mc-green::after { background: linear-gradient(90deg, #34d399, transparent); }
 
-    .mc-red { border-left-color: #f87171; }
-    .mc-red .mc-val { color: #f87171; }
+    .mc-red .mc-icon { color: #f87171; }
+    .mc-red .mc-val { color: #f87171; text-shadow: 0 0 20px rgba(248,113,113,0.3); }
+    .mc-red::after { background: linear-gradient(90deg, #f87171, transparent); }
 
-    .mc-amber { border-left-color: #fbbf24; }
-    .mc-amber .mc-val { color: #fbbf24; }
+    .mc-amber .mc-icon { color: #fbbf24; }
+    .mc-amber .mc-val { color: #fbbf24; text-shadow: 0 0 20px rgba(251,191,36,0.3); }
+    .mc-amber::after { background: linear-gradient(90deg, #fbbf24, transparent); }
 
     /* ── Threat bar ── */
     .threat-bar {
@@ -330,7 +354,7 @@ st.markdown("""
         background: linear-gradient(135deg, rgba(52,211,153,0.1), rgba(16,185,129,0.05));
         border: 1px solid rgba(52,211,153,0.25);
     }
-    .ab-icon { font-size: 1.4rem; }
+    .ab-icon { font-size: 1.8rem; filter: drop-shadow(0 0 10px currentColor); }
     .ab-danger .ab-icon { color: #f87171; }
     .ab-safe .ab-icon { color: #34d399; }
     .ab-title { font-weight: 700; color: #e2e8f0; font-size: 1rem; }
@@ -343,6 +367,7 @@ st.markdown("""
     }
     .sec-dot {
         width: 8px; height: 8px; border-radius: 50%;
+        box-shadow: 0 0 8px currentColor;
     }
     .sec-h h3 { margin: 0; font-size: 1rem; font-weight: 700; color: #e2e8f0; }
 
@@ -521,32 +546,38 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-unique_attacks = df[df["prediction"]==-1]["attack_type"].nunique()
 col1, col2, col3, col4 = st.columns(4)
 with col1:
     st.markdown(f"""<div class="mc mc-cyan">
+        <div class="mc-icon">📊</div>
         <div class="mc-label">Total Packets</div>
         <div class="mc-val">{total_packets:,}</div>
+        <div class="mc-sub">All captured traffic</div>
     </div>""", unsafe_allow_html=True)
 with col2:
     st.markdown(f"""<div class="mc mc-green">
+        <div class="mc-icon">✅</div>
         <div class="mc-label">Normal</div>
         <div class="mc-val">{n_normal:,}</div>
-        <div class="mc-sub">{normal_pct:.1f}%</div>
+        <div class="mc-sub">{normal_pct:.1f}% safe traffic</div>
     </div>""", unsafe_allow_html=True)
 with col3:
     st.markdown(f"""<div class="mc mc-red">
+        <div class="mc-icon">🚨</div>
         <div class="mc-label">Anomalies</div>
         <div class="mc-val">{n_anomalies:,}</div>
-        <div class="mc-sub">{anomaly_pct:.1f}%</div>
+        <div class="mc-sub">{anomaly_pct:.1f}% suspicious</div>
     </div>""", unsafe_allow_html=True)
 with col4:
+    unique_attacks = df[df["prediction"]==-1]["attack_type"].nunique()
     st.markdown(f"""<div class="mc mc-amber">
+        <div class="mc-icon">🎯</div>
         <div class="mc-label">Attack Types</div>
         <div class="mc-val">{unique_attacks}</div>
+        <div class="mc-sub">Unique threat patterns</div>
     </div>""", unsafe_allow_html=True)
 
-st.markdown("<div style='height:0.5rem'></div>", unsafe_allow_html=True)
+st.markdown("<div style='height:0.8rem'></div>", unsafe_allow_html=True)
 
 anomaly_df = df[df["prediction"] == -1]
 
@@ -559,21 +590,14 @@ FONT = "#94a3b8"
 BG = "rgba(0,0,0,0)"
 
 def chart_layout(fig, **kwargs):
-    grid = "rgba(255,255,255,0.04)"
-    defaults = dict(
+    fig.update_layout(
         paper_bgcolor=BG, plot_bgcolor=BG, font_color=FONT,
         margin=dict(t=10, b=10, l=10, r=10),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(size=11)),
-        xaxis=dict(gridcolor=grid, zerolinecolor=grid),
-        yaxis=dict(gridcolor=grid, zerolinecolor=grid),
+        xaxis=dict(gridcolor="rgba(255,255,255,0.04)", zerolinecolor="rgba(255,255,255,0.04)"),
+        yaxis=dict(gridcolor="rgba(255,255,255,0.04)", zerolinecolor="rgba(255,255,255,0.04)"),
+        **kwargs,
     )
-    # Merge kwargs into defaults (kwargs wins on conflict)
-    for key, val in kwargs.items():
-        if key in defaults and isinstance(defaults[key], dict) and isinstance(val, dict):
-            defaults[key].update(val)
-        else:
-            defaults[key] = val
-    fig.update_layout(**defaults)
     return fig
 
 # ──────────────────────────────────────────────
@@ -646,88 +670,8 @@ with tab2:
 
 # ── Tab 3: Top Attackers ───────────────────────
 
-# Threat assessment for each attack type
-ATTACK_RISK = {
-    "Port Scan": {
-        "severity": "HIGH",
-        "color": "#fb923c",
-        "issue": "Reconnaissance Attack",
-        "description": "Attacker is scanning for open ports to find vulnerable services (SSH, RDP, HTTP). This is usually the first step before a targeted attack.",
-        "action": "Block this IP on your firewall. Check if any scanned ports are unnecessarily open.",
-    },
-    "Ping of Death": {
-        "severity": "CRITICAL",
-        "color": "#f87171",
-        "issue": "Denial of Service (DoS)",
-        "description": "Sending oversized ICMP packets to crash or freeze your system. This can take down servers and network devices.",
-        "action": "Block ICMP from this IP immediately. Enable ICMP rate limiting on your firewall.",
-    },
-    "Data Exfiltration": {
-        "severity": "CRITICAL",
-        "color": "#f87171",
-        "issue": "Data Theft",
-        "description": "Large amounts of data are being sent to suspicious external ports. Sensitive files, credentials, or databases may be stolen.",
-        "action": "Isolate the source machine. Check for malware. Audit what data was accessed.",
-    },
-    "Suspicious Port": {
-        "severity": "HIGH",
-        "color": "#fb923c",
-        "issue": "Backdoor / Malware Communication",
-        "description": "Traffic to known malicious ports (4444, 31337, etc.) often used by trojans, reverse shells, and C2 servers.",
-        "action": "Scan the source machine for malware. Block these ports on your firewall.",
-    },
-    "Large Transfer": {
-        "severity": "MEDIUM",
-        "color": "#fbbf24",
-        "issue": "Unusual Data Movement",
-        "description": "Abnormally large data transfer detected. Could be data theft, unauthorized backup, or compromised machine uploading data.",
-        "action": "Verify if this transfer was authorized. Monitor the destination IP.",
-    },
-    "DNS Anomaly": {
-        "severity": "HIGH",
-        "color": "#fb923c",
-        "issue": "DNS Tunneling / Spoofing",
-        "description": "Suspicious DNS traffic that may be tunneling data through DNS queries or redirecting users to malicious websites.",
-        "action": "Check DNS server logs. Consider using encrypted DNS (DoH/DoT). Block suspicious DNS destinations.",
-    },
-    "Unknown Anomaly": {
-        "severity": "MEDIUM",
-        "color": "#fbbf24",
-        "issue": "Unclassified Threat",
-        "description": "AI detected an unusual traffic pattern that doesn't match known attacks. May be a zero-day or novel technique.",
-        "action": "Investigate the traffic manually. Capture packets for deeper analysis.",
-    },
-}
-
-def get_ip_threat_report(ip, adf):
-    """Generate a threat report for a specific IP."""
-    ip_data = adf[adf["src_ip"] == ip]
-    attacks = ip_data["attack_type"].value_counts().to_dict()
-    total = len(ip_data)
-    ports_targeted = sorted(ip_data["dst_port"].unique().tolist())[:10]
-    protocols = ip_data["protocol"].unique().tolist()
-    max_size = int(ip_data["packet_size"].max()) if len(ip_data) > 0 else 0
-
-    # Determine overall severity (worst of all attack types)
-    severity_order = {"CRITICAL": 3, "HIGH": 2, "MEDIUM": 1, "LOW": 0}
-    worst_severity = "MEDIUM"
-    for atk in attacks:
-        risk = ATTACK_RISK.get(atk, {})
-        if severity_order.get(risk.get("severity", "MEDIUM"), 1) > severity_order.get(worst_severity, 1):
-            worst_severity = risk.get("severity", "MEDIUM")
-
-    return {
-        "attacks": attacks,
-        "total": total,
-        "ports": ports_targeted,
-        "protocols": protocols,
-        "max_size": max_size,
-        "severity": worst_severity,
-    }
-
 with tab3:
     if len(anomaly_df) > 0:
-        # Top tables
         c1, c2 = st.columns(2)
         with c1:
             st.markdown("""<div class="sec-h"><div class="sec-dot" style="background:#ff5252; color:#ff5252;"></div>
@@ -744,71 +688,10 @@ with tab3:
             top_dst["Ports"] = top_dst["Destination IP"].apply(lambda ip: ", ".join(str(p) for p in anomaly_df[anomaly_df["dst_ip"]==ip]["dst_port"].unique()[:5]))
             st.dataframe(top_dst, use_container_width=True, hide_index=True)
 
-        # Bar chart
         fig = px.bar(top_src, x="Attacks", y="Source IP", orientation="h", color="Attacks",
                      color_continuous_scale=[[0,"#1e1b4b"],[0.5,"#7c4dff"],[1,"#e040fb"]])
         chart_layout(fig, yaxis=dict(autorange="reversed", gridcolor="rgba(255,255,255,0.04)"), showlegend=False, coloraxis_showscale=False)
         st.plotly_chart(fig, use_container_width=True)
-
-        # Threat Report for each attacker IP
-        st.markdown("""<div class="sec-h"><div class="sec-dot" style="background:#e040fb; color:#e040fb;"></div>
-            <h3>Threat Report — Attacker Details</h3></div>""", unsafe_allow_html=True)
-
-        for _, row in top_src.iterrows():
-            ip = row["Source IP"]
-            report = get_ip_threat_report(ip, anomaly_df)
-            sev = report["severity"]
-            sev_colors = {"CRITICAL": "#f87171", "HIGH": "#fb923c", "MEDIUM": "#fbbf24", "LOW": "#34d399"}
-            sev_color = sev_colors.get(sev, "#fbbf24")
-
-            # Build attack details HTML
-            attack_details = ""
-            for atk, count in report["attacks"].items():
-                risk = ATTACK_RISK.get(atk, {})
-                atk_color = risk.get("color", "#fbbf24")
-                atk_issue = risk.get("issue", "Unknown")
-                atk_desc = risk.get("description", "")
-                atk_action = risk.get("action", "")
-                attack_details += f"""
-                <div style="margin: 0.6rem 0 0.6rem 0; padding: 0.7rem 1rem; background:rgba(255,255,255,0.02);
-                            border-radius:10px; border-left: 3px solid {atk_color};">
-                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.3rem;">
-                        <span style="color:{atk_color}; font-weight:700; font-size:0.9rem;">{atk} ({count}x)</span>
-                        <span style="color:{atk_color}; font-size:0.7rem; font-weight:600;
-                                     background:rgba(255,255,255,0.05); padding:2px 8px; border-radius:4px;">{atk_issue}</span>
-                    </div>
-                    <div style="color:#94a3b8; font-size:0.8rem; line-height:1.4;">{atk_desc}</div>
-                    <div style="color:#67e8f9; font-size:0.78rem; margin-top:0.3rem;">
-                        <strong>Recommended:</strong> {atk_action}
-                    </div>
-                </div>"""
-
-            ports_str = ", ".join(str(p) for p in report["ports"]) if report["ports"] else "N/A"
-            proto_str = ", ".join(report["protocols"])
-
-            st.markdown(f"""
-            <div style="background:rgba(15,23,42,0.6); backdrop-filter:blur(12px);
-                        border:1px solid rgba(255,255,255,0.06); border-radius:14px;
-                        padding:1.2rem 1.4rem; margin-bottom:1rem;
-                        border-top:3px solid {sev_color};">
-                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.8rem;">
-                    <div>
-                        <span style="color:#e2e8f0; font-size:1.1rem; font-weight:800;">🔴 {ip}</span>
-                        <span style="color:#64748b; font-size:0.8rem; margin-left:0.6rem;">{report['total']} anomalous packet(s)</span>
-                    </div>
-                    <span style="color:{sev_color}; font-size:0.75rem; font-weight:700;
-                                 background:rgba(255,255,255,0.05); padding:3px 12px;
-                                 border-radius:4px; border:1px solid {sev_color}40;">{sev} RISK</span>
-                </div>
-                <div style="display:flex; gap:2rem; margin-bottom:0.5rem; color:#64748b; font-size:0.78rem;">
-                    <span>Protocols: <strong style="color:#e2e8f0;">{proto_str}</strong></span>
-                    <span>Targeted Ports: <strong style="color:#e2e8f0;">{ports_str}</strong></span>
-                    <span>Max Packet: <strong style="color:#e2e8f0;">{report['max_size']:,} bytes</strong></span>
-                </div>
-                {attack_details}
-            </div>
-            """, unsafe_allow_html=True)
-
     else:
         st.markdown("""<div class="alert-banner ab-safe"><div class="ab-icon">🏴‍☠️</div>
             <div><div class="ab-title">No Attackers Found</div>
