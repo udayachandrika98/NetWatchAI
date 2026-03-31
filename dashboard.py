@@ -7,14 +7,20 @@ Usage:
 """
 
 import os
+import io
+import re
+import json
 import subprocess
 import socket
 import time
 import html as html_module
+from datetime import datetime
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import requests
+from fpdf import FPDF
 from src.detector import AnomalyDetector
 from src.utils import PACKETS_CSV, SAMPLE_CSV, MODEL_PATH
 
@@ -124,6 +130,336 @@ def classify_attack(row):
     if packet_size > 5000: return "Large Transfer"
     if protocol == "UDP" and dst_port == 53 and packet_size > 200: return "DNS Anomaly"
     return "Unknown Anomaly"
+
+
+# ──────────────────────────────────────────────
+# GeoIP Lookup
+# ──────────────────────────────────────────────
+
+@st.cache_data(ttl=3600)
+def get_ip_geolocation(ip):
+    """Get geolocation for an IP using ip-api.com (free, no key needed)."""
+    try:
+        if ip.startswith(("10.", "172.16.", "192.168.", "127.")):
+            return None
+        resp = requests.get(f"http://ip-api.com/json/{ip}?fields=status,country,countryCode,city,lat,lon,isp", timeout=3)
+        data = resp.json()
+        if data.get("status") == "success":
+            return data
+    except Exception:
+        pass
+    return None
+
+@st.cache_data(ttl=300)
+def get_geo_data_for_ips(ips):
+    """Batch geolocate a list of IPs. Returns list of dicts with geo info."""
+    results = []
+    for ip in ips[:50]:  # Limit to 50 to avoid rate limiting
+        geo = get_ip_geolocation(ip)
+        if geo:
+            geo["ip"] = ip
+            results.append(geo)
+        time.sleep(0.1)  # Rate limit: max 45 req/min for ip-api.com
+    return results
+
+
+# ──────────────────────────────────────────────
+# AI Threat Analyst Chatbot
+# ──────────────────────────────────────────────
+
+def ai_threat_analyst(query, df, anomaly_df):
+    """Rule-based AI chatbot that answers questions about network traffic."""
+    query_lower = query.lower().strip()
+
+    # Greeting
+    if any(w in query_lower for w in ["hello", "hi", "hey"]):
+        return "Hello! I'm the NetWatchAI Threat Analyst. Ask me about your network traffic, attacks, or suspicious IPs."
+
+    # Help
+    if any(w in query_lower for w in ["help", "what can you"]):
+        return """I can answer questions like:
+- "How many attacks were detected?"
+- "Show me port scans"
+- "Which IP is most dangerous?"
+- "What's the threat level?"
+- "Explain DNS anomaly"
+- "Show attacks from 192.168.x.x"
+- "Summary" or "Report"
+- "What protocols are used?"
+- "Show large transfers"
+"""
+
+    # Summary / Report
+    if any(w in query_lower for w in ["summary", "report", "overview", "status"]):
+        n_total = len(df)
+        n_anom = len(anomaly_df)
+        pct = (n_anom / n_total * 100) if n_total > 0 else 0
+        attack_counts = anomaly_df["attack_type"].value_counts().to_dict() if len(anomaly_df) > 0 else {}
+        top_src = anomaly_df["src_ip"].value_counts().head(3).to_dict() if len(anomaly_df) > 0 else {}
+        response = f"**Network Security Summary**\n\n"
+        response += f"- Total packets analyzed: **{n_total:,}**\n"
+        response += f"- Anomalies detected: **{n_anom:,}** ({pct:.1f}%)\n"
+        response += f"- Unique attack types: **{len(attack_counts)}**\n\n"
+        if attack_counts:
+            response += "**Attack Breakdown:**\n"
+            for at, cnt in attack_counts.items():
+                response += f"- {at}: {cnt} occurrences\n"
+            response += "\n**Top Suspicious IPs:**\n"
+            for ip, cnt in top_src.items():
+                response += f"- `{ip}`: {cnt} attacks\n"
+        else:
+            response += "No threats detected. Your network looks clean!"
+        return response
+
+    # Threat level
+    if any(w in query_lower for w in ["threat level", "risk level", "how safe", "danger"]):
+        pct = (len(anomaly_df) / len(df) * 100) if len(df) > 0 else 0
+        if pct == 0: level = "GREEN (All Clear)"
+        elif pct < 5: level = "GREEN (Low Risk)"
+        elif pct < 15: level = "YELLOW (Medium - Suspicious Activity)"
+        elif pct < 30: level = "ORANGE (High - Active Threats)"
+        else: level = "RED (Critical - Under Attack)"
+        return f"Current threat level: **{level}**\n\nAnomaly rate: **{pct:.1f}%** ({len(anomaly_df)} out of {len(df)} packets)"
+
+    # Count attacks
+    if any(w in query_lower for w in ["how many attack", "how many anomal", "how many threat", "count attack"]):
+        return f"**{len(anomaly_df)}** anomalies detected out of **{len(df)}** total packets ({len(anomaly_df)/len(df)*100:.1f}% anomaly rate)."
+
+    # Specific attack type queries
+    attack_keywords = {
+        "port scan": "Port Scan", "portscan": "Port Scan",
+        "ping of death": "Ping of Death", "ping": "Ping of Death",
+        "data exfiltration": "Data Exfiltration", "exfiltration": "Data Exfiltration",
+        "dns anomaly": "DNS Anomaly", "dns": "DNS Anomaly",
+        "suspicious port": "Suspicious Port",
+        "large transfer": "Large Transfer",
+    }
+    for keyword, attack_type in attack_keywords.items():
+        if keyword in query_lower:
+            subset = anomaly_df[anomaly_df["attack_type"] == attack_type]
+            if len(subset) == 0:
+                return f"No **{attack_type}** attacks detected in current data."
+            top_ips = subset["src_ip"].value_counts().head(5).to_dict()
+            desc = {
+                "Port Scan": "Attackers probe open ports to find vulnerabilities. Look for TCP SYN-only packets to sequential ports.",
+                "Ping of Death": "Oversized ICMP packets (>1000 bytes) designed to crash or freeze target systems.",
+                "Data Exfiltration": "Large data transfers to suspicious ports (4444, 31337) — possible data theft.",
+                "DNS Anomaly": "Unusually large DNS queries — could indicate DNS tunneling or spoofing.",
+                "Suspicious Port": "Traffic on known backdoor ports (1337, 5555, 6666, etc.).",
+                "Large Transfer": "Packets exceeding 5000 bytes — could be unauthorized data movement.",
+            }
+            response = f"**{attack_type} — {len(subset)} detected**\n\n"
+            response += f"{desc.get(attack_type, '')}\n\n"
+            response += "**Source IPs involved:**\n"
+            for ip, cnt in top_ips.items():
+                response += f"- `{ip}`: {cnt} packets\n"
+            return response
+
+    # Query by specific IP
+    ip_match = re.search(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', query)
+    if ip_match:
+        ip = ip_match.group()
+        ip_packets = df[(df["src_ip"] == ip) | (df["dst_ip"] == ip)]
+        ip_anomalies = anomaly_df[(anomaly_df["src_ip"] == ip) | (anomaly_df["dst_ip"] == ip)]
+        if len(ip_packets) == 0:
+            return f"No traffic found for IP `{ip}`."
+        response = f"**Analysis for `{ip}`**\n\n"
+        response += f"- Total packets: **{len(ip_packets)}**\n"
+        response += f"- Anomalous packets: **{len(ip_anomalies)}**\n"
+        if len(ip_anomalies) > 0:
+            attacks = ip_anomalies["attack_type"].value_counts().to_dict()
+            response += f"- Attack types: {', '.join(f'{k} ({v})' for k, v in attacks.items())}\n"
+            response += f"\n**Verdict: This IP is suspicious.** Found in {len(ip_anomalies)} anomalous packets."
+        else:
+            response += "\n**Verdict: This IP appears clean.** No anomalous activity detected."
+        return response
+
+    # Most dangerous IP
+    if any(w in query_lower for w in ["most dangerous", "worst ip", "top attacker", "biggest threat"]):
+        if len(anomaly_df) == 0:
+            return "No threats detected. No dangerous IPs found."
+        top = anomaly_df["src_ip"].value_counts().head(1)
+        ip = top.index[0]
+        cnt = top.values[0]
+        attacks = anomaly_df[anomaly_df["src_ip"] == ip]["attack_type"].value_counts().to_dict()
+        return f"Most dangerous IP: **`{ip}`** with **{cnt}** attacks.\n\nAttack types: {', '.join(f'{k} ({v})' for k, v in attacks.items())}"
+
+    # Protocol info
+    if any(w in query_lower for w in ["protocol", "tcp", "udp", "icmp"]):
+        proto_counts = df["protocol"].value_counts().to_dict()
+        response = "**Protocol Distribution:**\n\n"
+        for proto, cnt in proto_counts.items():
+            anom_cnt = len(anomaly_df[anomaly_df["protocol"] == proto])
+            response += f"- **{proto}**: {cnt} packets ({anom_cnt} anomalies)\n"
+        return response
+
+    # Default
+    return "I'm not sure how to answer that. Try asking about:\n- Attack types (port scan, DNS anomaly, etc.)\n- Specific IPs\n- Threat level\n- Summary/report\n- Protocol distribution\n\nType **help** for more options."
+
+
+# ──────────────────────────────────────────────
+# PDF Report Generator
+# ──────────────────────────────────────────────
+
+def generate_pdf_report(df, anomaly_df):
+    """Generate a professional PDF security report."""
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+
+    # Title Page
+    pdf.add_page()
+    pdf.set_fill_color(10, 14, 26)
+    pdf.rect(0, 0, 210, 297, 'F')
+    pdf.set_text_color(0, 229, 255)
+    pdf.set_font("Helvetica", "B", 36)
+    pdf.ln(60)
+    pdf.cell(0, 20, "NetWatchAI", align="C", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 16)
+    pdf.set_text_color(148, 163, 184)
+    pdf.cell(0, 10, "Security Threat Report", align="C", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(10)
+    pdf.set_font("Helvetica", "", 12)
+    pdf.cell(0, 10, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", align="C", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 10, "AI-Powered Network Monitoring & Intrusion Detection", align="C", new_x="LMARGIN", new_y="NEXT")
+
+    # Executive Summary Page
+    pdf.add_page()
+    pdf.set_fill_color(255, 255, 255)
+    pdf.rect(0, 0, 210, 297, 'F')
+    pdf.set_text_color(15, 23, 42)
+    pdf.set_font("Helvetica", "B", 22)
+    pdf.cell(0, 15, "Executive Summary", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_draw_color(0, 229, 255)
+    pdf.set_line_width(1)
+    pdf.line(10, pdf.get_y(), 200, pdf.get_y())
+    pdf.ln(8)
+
+    total = len(df)
+    n_anom = len(anomaly_df)
+    pct = (n_anom / total * 100) if total > 0 else 0
+
+    if pct == 0: level, level_color = "ALL CLEAR", (52, 211, 153)
+    elif pct < 5: level, level_color = "LOW RISK", (52, 211, 153)
+    elif pct < 15: level, level_color = "MEDIUM", (251, 191, 36)
+    elif pct < 30: level, level_color = "HIGH", (251, 146, 60)
+    else: level, level_color = "CRITICAL", (248, 113, 113)
+
+    pdf.set_font("Helvetica", "B", 14)
+    pdf.set_text_color(*level_color)
+    pdf.cell(0, 10, f"Threat Level: {level}", new_x="LMARGIN", new_y="NEXT")
+
+    pdf.set_text_color(15, 23, 42)
+    pdf.set_font("Helvetica", "", 11)
+    pdf.ln(3)
+    summary_items = [
+        f"Total Packets Analyzed: {total:,}",
+        f"Normal Traffic: {total - n_anom:,} ({100-pct:.1f}%)",
+        f"Anomalies Detected: {n_anom:,} ({pct:.1f}%)",
+        f"Unique Attack Types: {anomaly_df['attack_type'].nunique() if n_anom > 0 else 0}",
+        f"Unique Source IPs (Attackers): {anomaly_df['src_ip'].nunique() if n_anom > 0 else 0}",
+        f"Unique Destination IPs (Targets): {anomaly_df['dst_ip'].nunique() if n_anom > 0 else 0}",
+    ]
+    for item in summary_items:
+        pdf.cell(0, 7, f"  {item}", new_x="LMARGIN", new_y="NEXT")
+
+    # Attack Breakdown
+    if n_anom > 0:
+        pdf.ln(8)
+        pdf.set_font("Helvetica", "B", 16)
+        pdf.cell(0, 12, "Attack Type Breakdown", new_x="LMARGIN", new_y="NEXT")
+        pdf.set_draw_color(124, 77, 255)
+        pdf.line(10, pdf.get_y(), 200, pdf.get_y())
+        pdf.ln(5)
+
+        attack_counts = anomaly_df["attack_type"].value_counts()
+        desc_map = {
+            "Port Scan": "Probing open ports to find vulnerabilities",
+            "Ping of Death": "Oversized ICMP packets to crash systems",
+            "Data Exfiltration": "Stealing data via suspicious ports",
+            "Suspicious Port": "Traffic to known backdoor ports",
+            "Large Transfer": "Abnormally large data transfer",
+            "DNS Anomaly": "DNS tunneling or spoofing attempt",
+            "Unknown Anomaly": "Unclassified suspicious pattern",
+        }
+
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.set_fill_color(240, 240, 250)
+        pdf.cell(70, 8, "Attack Type", border=1, fill=True)
+        pdf.cell(30, 8, "Count", border=1, fill=True, align="C")
+        pdf.cell(90, 8, "Description", border=1, fill=True)
+        pdf.ln()
+
+        pdf.set_font("Helvetica", "", 10)
+        for attack, count in attack_counts.items():
+            pdf.cell(70, 7, str(attack), border=1)
+            pdf.cell(30, 7, str(count), border=1, align="C")
+            pdf.cell(90, 7, desc_map.get(str(attack), ""), border=1)
+            pdf.ln()
+
+        # Top Attackers
+        pdf.ln(8)
+        pdf.set_font("Helvetica", "B", 16)
+        pdf.cell(0, 12, "Top Suspicious IPs", new_x="LMARGIN", new_y="NEXT")
+        pdf.set_draw_color(248, 113, 113)
+        pdf.line(10, pdf.get_y(), 200, pdf.get_y())
+        pdf.ln(5)
+
+        top_src = anomaly_df["src_ip"].value_counts().head(10)
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.set_fill_color(255, 240, 240)
+        pdf.cell(50, 8, "Source IP", border=1, fill=True)
+        pdf.cell(30, 8, "Attacks", border=1, fill=True, align="C")
+        pdf.cell(110, 8, "Attack Types", border=1, fill=True)
+        pdf.ln()
+
+        pdf.set_font("Helvetica", "", 10)
+        for ip, cnt in top_src.items():
+            types = ", ".join(anomaly_df[anomaly_df["src_ip"] == ip]["attack_type"].unique())
+            pdf.cell(50, 7, str(ip), border=1)
+            pdf.cell(30, 7, str(cnt), border=1, align="C")
+            pdf.cell(110, 7, types[:50], border=1)
+            pdf.ln()
+
+    # Recommendations
+    pdf.add_page()
+    pdf.set_font("Helvetica", "B", 22)
+    pdf.cell(0, 15, "Recommendations", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_draw_color(52, 211, 153)
+    pdf.line(10, pdf.get_y(), 200, pdf.get_y())
+    pdf.ln(8)
+
+    pdf.set_font("Helvetica", "", 11)
+    recommendations = []
+    if n_anom > 0:
+        attack_types = set(anomaly_df["attack_type"].unique())
+        if "Port Scan" in attack_types:
+            recommendations.append("Port Scan Detected: Configure firewall rules to limit SYN packet rates. Enable SYN cookies on servers.")
+        if "Ping of Death" in attack_types:
+            recommendations.append("Ping of Death Detected: Block oversized ICMP packets at the network perimeter. Limit ICMP traffic.")
+        if "Data Exfiltration" in attack_types:
+            recommendations.append("Data Exfiltration Risk: Block outbound traffic to suspicious ports (4444, 31337). Monitor for large outbound transfers.")
+        if "DNS Anomaly" in attack_types:
+            recommendations.append("DNS Anomaly Detected: Inspect DNS queries for tunneling patterns. Consider DNS filtering solutions.")
+        if "Suspicious Port" in attack_types:
+            recommendations.append("Suspicious Port Activity: Block known backdoor ports at the firewall. Audit running services.")
+        if "Large Transfer" in attack_types:
+            recommendations.append("Large Transfer Detected: Investigate unauthorized bulk data movement. Set data transfer thresholds.")
+        recommendations.append("General: Review and update firewall rules. Enable network segmentation. Conduct regular security audits.")
+    else:
+        recommendations.append("No threats detected. Continue monitoring and keep security policies up to date.")
+        recommendations.append("Consider running periodic vulnerability scans to proactively identify weaknesses.")
+
+    for i, rec in enumerate(recommendations, 1):
+        pdf.multi_cell(0, 7, f"{i}. {rec}")
+        pdf.ln(2)
+
+    # Footer on each page
+    pdf.set_font("Helvetica", "I", 8)
+    pdf.set_text_color(150, 150, 150)
+    pdf.set_y(-20)
+    pdf.cell(0, 10, "Generated by NetWatchAI - AI-Powered Network Intrusion Detection System", align="C")
+
+    return bytes(pdf.output())
 
 
 # ──────────────────────────────────────────────
@@ -604,9 +940,10 @@ def chart_layout(fig, **kwargs):
 # Tabs
 # ──────────────────────────────────────────────
 
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
     "🚨 Alerts", "🎯 Attack Types", "🏴‍☠️ Top Attackers",
     "📈 Timeline", "📊 Statistics", "📡 Network Info",
+    "🤖 AI Analyst", "🌍 Attack Map", "📄 PDF Report",
 ])
 
 # ── Tab 1: Alerts ──────────────────────────────
@@ -690,7 +1027,8 @@ with tab3:
 
         fig = px.bar(top_src, x="Attacks", y="Source IP", orientation="h", color="Attacks",
                      color_continuous_scale=[[0,"#1e1b4b"],[0.5,"#7c4dff"],[1,"#e040fb"]])
-        chart_layout(fig, yaxis=dict(autorange="reversed", gridcolor="rgba(255,255,255,0.04)"), showlegend=False, coloraxis_showscale=False)
+        chart_layout(fig, showlegend=False, coloraxis_showscale=False)
+        fig.update_layout(yaxis=dict(autorange="reversed", gridcolor="rgba(255,255,255,0.04)"))
         st.plotly_chart(fig, use_container_width=True)
     else:
         st.markdown("""<div class="alert-banner ab-safe"><div class="ab-icon">🏴‍☠️</div>
@@ -802,6 +1140,171 @@ with tab6:
                             {"range":[60,100],"color":"rgba(52,211,153,0.1)"}]}))
         fig.update_layout(height=250, margin=dict(t=40,b=10,l=30,r=30), paper_bgcolor=BG, font_color="#94a3b8")
         st.plotly_chart(fig, use_container_width=True)
+
+# ── Tab 7: AI Threat Analyst ──────────────────
+
+with tab7:
+    st.markdown("""<div class="sec-h"><div class="sec-dot" style="background:#00e5ff; color:#00e5ff;"></div>
+        <h3>AI Threat Analyst</h3></div>""", unsafe_allow_html=True)
+    st.markdown("""<div class="glass" style="margin-bottom:1rem;">
+        <div style="color:#94a3b8; font-size:0.85rem;">
+        Ask me anything about your network traffic. Try: <b>"summary"</b>, <b>"most dangerous IP"</b>,
+        <b>"show port scans"</b>, <b>"threat level"</b>, or ask about a specific IP address.
+        </div></div>""", unsafe_allow_html=True)
+
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
+
+    for msg in st.session_state.chat_history:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    user_query = st.chat_input("Ask the AI Threat Analyst...")
+    if user_query:
+        st.session_state.chat_history.append({"role": "user", "content": user_query})
+        with st.chat_message("user"):
+            st.markdown(user_query)
+
+        response = ai_threat_analyst(user_query, df, anomaly_df)
+        st.session_state.chat_history.append({"role": "assistant", "content": response})
+        with st.chat_message("assistant"):
+            st.markdown(response)
+
+# ── Tab 8: Attack Map ────────────────────────
+
+with tab8:
+    st.markdown("""<div class="sec-h"><div class="sec-dot" style="background:#e040fb; color:#e040fb;"></div>
+        <h3>Global Attack Map</h3></div>""", unsafe_allow_html=True)
+
+    if len(anomaly_df) > 0:
+        attacker_ips = anomaly_df["src_ip"].unique().tolist()
+        geo_data = get_geo_data_for_ips(attacker_ips)
+
+        if geo_data:
+            geo_df = pd.DataFrame(geo_data)
+            # Add attack counts
+            ip_counts = anomaly_df["src_ip"].value_counts().to_dict()
+            geo_df["attacks"] = geo_df["ip"].map(ip_counts).fillna(1).astype(int)
+            geo_df["attack_types"] = geo_df["ip"].apply(
+                lambda ip: ", ".join(anomaly_df[anomaly_df["src_ip"] == ip]["attack_type"].unique())
+            )
+            geo_df["label"] = geo_df.apply(
+                lambda r: f"{r['ip']} ({r['city']}, {r['country']})<br>Attacks: {r['attacks']}<br>{r['attack_types']}", axis=1
+            )
+
+            fig = go.Figure()
+
+            # Attack lines from source to local position (center of map)
+            for _, row in geo_df.iterrows():
+                fig.add_trace(go.Scattergeo(
+                    lon=[row["lon"], None],
+                    lat=[row["lat"], None],
+                    mode="lines",
+                    line=dict(width=1, color="rgba(248,113,113,0.4)"),
+                    showlegend=False,
+                    hoverinfo="skip",
+                ))
+
+            # Attacker dots
+            fig.add_trace(go.Scattergeo(
+                lon=geo_df["lon"],
+                lat=geo_df["lat"],
+                text=geo_df["label"],
+                hoverinfo="text",
+                mode="markers",
+                marker=dict(
+                    size=geo_df["attacks"].clip(upper=30) * 2 + 6,
+                    color="#f87171",
+                    opacity=0.8,
+                    line=dict(width=1, color="#ff5252"),
+                    sizemode="diameter",
+                ),
+                name="Attackers",
+            ))
+
+            fig.update_geos(
+                bgcolor="rgba(10,14,26,0.9)",
+                landcolor="rgba(30,40,60,0.8)",
+                oceancolor="rgba(10,14,26,0.9)",
+                lakecolor="rgba(10,14,26,0.5)",
+                coastlinecolor="rgba(0,229,255,0.3)",
+                countrycolor="rgba(0,229,255,0.15)",
+                showframe=False,
+                projection_type="natural earth",
+            )
+            fig.update_layout(
+                height=500,
+                paper_bgcolor="rgba(0,0,0,0)",
+                geo=dict(bgcolor="rgba(10,14,26,0.9)"),
+                margin=dict(t=10, b=10, l=0, r=0),
+                showlegend=False,
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Attacker table with geo info
+            st.markdown("""<div class="sec-h"><div class="sec-dot" style="background:#ff5252; color:#ff5252;"></div>
+                <h3>Attacker Locations</h3></div>""", unsafe_allow_html=True)
+            display_geo = geo_df[["ip", "city", "country", "isp", "attacks", "attack_types"]].copy()
+            display_geo.columns = ["IP Address", "City", "Country", "ISP", "Attacks", "Attack Types"]
+            st.dataframe(display_geo.sort_values("Attacks", ascending=False), use_container_width=True, hide_index=True)
+        else:
+            st.info("Could not geolocate attacker IPs. They may all be private/local addresses.")
+    else:
+        st.markdown("""<div class="alert-banner ab-safe"><div class="ab-icon">🌍</div>
+            <div><div class="ab-title">No Attacks to Map</div>
+            <div class="ab-desc">No anomalous traffic detected. The map will populate when threats are found.</div></div></div>""",
+            unsafe_allow_html=True)
+
+# ── Tab 9: PDF Report ────────────────────────
+
+with tab9:
+    st.markdown("""<div class="sec-h"><div class="sec-dot" style="background:#ffd740; color:#ffd740;"></div>
+        <h3>Security Threat Report</h3></div>""", unsafe_allow_html=True)
+
+    st.markdown("""<div class="glass">
+        <div style="color:#e2e8f0; font-weight:600; font-size:1rem; margin-bottom:0.5rem;">Generate PDF Report</div>
+        <div style="color:#94a3b8; font-size:0.85rem;">
+        Download a professional security report with executive summary, attack breakdown,
+        top attacker analysis, and actionable recommendations. Share it with your team or management.
+        </div></div>""", unsafe_allow_html=True)
+
+    st.markdown("<div style='height:0.5rem'></div>", unsafe_allow_html=True)
+
+    # Report preview
+    total = len(df)
+    n_anom = len(anomaly_df)
+    pct = (n_anom / total * 100) if total > 0 else 0
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.metric("Total Packets", f"{total:,}")
+    with c2:
+        st.metric("Anomalies", f"{n_anom:,}")
+    with c3:
+        st.metric("Anomaly Rate", f"{pct:.1f}%")
+
+    st.markdown("<div style='height:0.5rem'></div>", unsafe_allow_html=True)
+
+    report_contents = "**Report will include:**\n"
+    report_contents += "- Cover page with branding\n"
+    report_contents += "- Executive summary with threat level\n"
+    report_contents += "- Attack type breakdown with descriptions\n"
+    report_contents += "- Top suspicious IP addresses\n"
+    report_contents += "- Actionable security recommendations\n"
+    st.markdown(report_contents)
+
+    if st.button("Generate PDF Report", type="primary", use_container_width=True):
+        with st.spinner("Generating security report..."):
+            pdf_bytes = generate_pdf_report(df, anomaly_df)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            st.download_button(
+                label="Download Report",
+                data=pdf_bytes,
+                file_name=f"NetWatchAI_Report_{timestamp}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+            )
+        st.success("Report generated successfully! Click 'Download Report' above.")
 
 # ──────────────────────────────────────────────
 # Footer

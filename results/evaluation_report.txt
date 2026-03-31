@@ -1,0 +1,115 @@
+============================================================
+  NetWatchAI — Model Evaluation Report
+============================================================
+
+Dataset: NSL-KDD
+Training samples: 125,973
+Test samples: 22,544
+
+------------------------------------------------------------
+MODEL COMPARISON
+------------------------------------------------------------
+
+           Model  Accuracy  Precision   Recall  F1-Score
+Isolation Forest  0.575852   0.872976 0.298293  0.444651
+   Random Forest  0.769917   0.966106 0.617471  0.753411
+   Decision Tree  0.794136   0.965455 0.662043  0.785467
+             SVM  0.781228   0.976021 0.631185  0.766610
+
+------------------------------------------------------------
+TRAINING TIMES
+------------------------------------------------------------
+
+  Isolation Forest: 0.38 seconds
+  Random Forest: 0.79 seconds
+  Decision Tree: 0.41 seconds
+  SVM: 2.90 seconds
+
+------------------------------------------------------------
+DETAILED REPORT: Isolation Forest
+------------------------------------------------------------
+
+              precision    recall  f1-score   support
+
+      Normal       0.50      0.94      0.66      9711
+      Attack       0.87      0.30      0.44     12833
+
+    accuracy                           0.58     22544
+   macro avg       0.69      0.62      0.55     22544
+weighted avg       0.71      0.58      0.54     22544
+
+Confusion Matrix:
+[[9154  557]
+ [9005 3828]]
+
+------------------------------------------------------------
+DETAILED REPORT: Random Forest
+------------------------------------------------------------
+
+              precision    recall  f1-score   support
+
+      Normal       0.66      0.97      0.78      9711
+      Attack       0.97      0.62      0.75     12833
+
+    accuracy                           0.77     22544
+   macro avg       0.81      0.79      0.77     22544
+weighted avg       0.83      0.77      0.77     22544
+
+Confusion Matrix:
+[[9433  278]
+ [4909 7924]]
+
+------------------------------------------------------------
+DETAILED REPORT: Decision Tree
+------------------------------------------------------------
+
+              precision    recall  f1-score   support
+
+      Normal       0.68      0.97      0.80      9711
+      Attack       0.97      0.66      0.79     12833
+
+    accuracy                           0.79     22544
+   macro avg       0.82      0.82      0.79     22544
+weighted avg       0.84      0.79      0.79     22544
+
+Confusion Matrix:
+[[9407  304]
+ [4337 8496]]
+
+------------------------------------------------------------
+DETAILED REPORT: SVM
+------------------------------------------------------------
+
+              precision    recall  f1-score   support
+
+      Normal       0.67      0.98      0.79      9711
+      Attack       0.98      0.63      0.77     12833
+
+    accuracy                           0.78     22544
+   macro avg       0.82      0.81      0.78     22544
+weighted avg       0.84      0.78      0.78     22544
+
+Confusion Matrix:
+[[9512  199]
+ [4733 8100]]
+
+============================================================
+KEY FINDINGS
+============================================================
+
+Best overall model (by F1-Score): Decision Tree
+  Accuracy:  0.7941
+  Precision: 0.9655
+  Recall:    0.6620
+  F1-Score:  0.7855
+
+Isolation Forest (NetWatchAI's model):
+  Accuracy:  0.5759
+  Precision: 0.8730
+  Recall:    0.2983
+  F1-Score:  0.4447
+
+Note: Isolation Forest is unsupervised (requires no labeled data),
+while Random Forest, Decision Tree, and SVM are supervised (require labels).
+This is a significant advantage in real-world scenarios where labeled
+attack data is often unavailable.
