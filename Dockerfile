@@ -24,6 +24,12 @@ COPY . .
 # Train the model during build so it's ready to use
 RUN python train.py
 
+# Create non-root user for security
+RUN groupadd -r netwatchai && useradd -r -g netwatchai -d /app netwatchai \
+    && chown -R netwatchai:netwatchai /app
+
+USER netwatchai
+
 # Expose Streamlit port
 EXPOSE 8501
 

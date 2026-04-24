@@ -1,22 +1,18 @@
 """Tests for src/utils.py — paths, logging, directory creation."""
 
 import os
-import tempfile
-import shutil
-import pytest
 
 from src.utils import (
-    PROJECT_ROOT,
+    CSV_COLUMNS,
     DATA_DIR,
+    MODEL_PATH,
     MODELS_DIR,
     PACKETS_CSV,
+    PROJECT_ROOT,
     SAMPLE_CSV,
-    MODEL_PATH,
-    CSV_COLUMNS,
-    setup_logger,
     ensure_dirs,
+    setup_logger,
 )
-
 
 # ── Path constants ──────────────────────────────
 
@@ -104,6 +100,7 @@ class TestNoUnusedImports:
     def test_utils_no_unused_datetime_import(self):
         """utils.py should not import datetime (it was unused)."""
         import inspect
+
         import src.utils
         source = inspect.getsource(src.utils)
         assert "from datetime import datetime" not in source

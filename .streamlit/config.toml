@@ -4,10 +4,11 @@ address = "0.0.0.0"
 port = 8501
 
 [theme]
-primaryColor = "#00e5ff"
-backgroundColor = "#0a0e1a"
-secondaryBackgroundColor = "#111827"
-textColor = "#e2e8f0"
+base = "dark"
+primaryColor = "#6366f1"
+backgroundColor = "#09090b"
+secondaryBackgroundColor = "#111114"
+textColor = "#fafafa"
 font = "sans serif"
 
 [browser]

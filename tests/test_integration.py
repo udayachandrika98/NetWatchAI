@@ -1,17 +1,14 @@
 """Integration tests — end-to-end workflows."""
 
-import os
-import csv
-import tempfile
 import pandas as pd
 import pytest
+from scapy.layers.inet import ICMP, IP, TCP, UDP
 
-from src.utils import SAMPLE_CSV, CSV_COLUMNS
-from src.model import train_model
 from src.detector import AnomalyDetector
-from src.sniffer import PacketSniffer
 from src.feature_extractor import extract_features
-from scapy.layers.inet import IP, TCP, UDP, ICMP
+from src.model import train_model
+from src.sniffer import PacketSniffer
+from src.utils import CSV_COLUMNS, SAMPLE_CSV
 
 
 class TestEndToEndPipeline:

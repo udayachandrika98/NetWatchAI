@@ -2,8 +2,8 @@
 
 import os
 import tempfile
+
 import pandas as pd
-import pytest
 
 from src.model import load_and_prepare_data, train_model
 from src.utils import SAMPLE_CSV

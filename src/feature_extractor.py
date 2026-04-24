@@ -14,7 +14,8 @@ Features extracted per packet:
 """
 
 from datetime import datetime
-from scapy.layers.inet import IP, TCP, UDP, ICMP
+
+from scapy.layers.inet import ICMP, IP, TCP, UDP
 
 
 def extract_features(packet) -> dict | None:

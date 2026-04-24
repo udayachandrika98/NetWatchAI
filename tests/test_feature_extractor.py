@@ -1,8 +1,6 @@
 """Tests for src/feature_extractor.py — packet feature extraction."""
 
-import pytest
-from unittest.mock import MagicMock
-from scapy.layers.inet import IP, TCP, UDP, ICMP
+from scapy.layers.inet import ICMP, IP, TCP, UDP
 from scapy.layers.l2 import Ether
 
 from src.feature_extractor import extract_features

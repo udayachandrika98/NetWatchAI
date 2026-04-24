@@ -1,13 +1,11 @@
 """Tests for src/detector.py — anomaly detection."""
 
-import os
-import tempfile
 import pandas as pd
 import pytest
 
-from src.model import train_model
 from src.detector import AnomalyDetector
-from src.utils import SAMPLE_CSV, MODEL_PATH
+from src.model import train_model
+from src.utils import SAMPLE_CSV
 
 
 @pytest.fixture(scope="module")

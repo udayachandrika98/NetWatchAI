@@ -1,6 +1,6 @@
 #!/bin/bash
 # NetWatchAI - One-Command Setup
-# Usage: curl -sSL https://raw.githubusercontent.com/yourusername/NetWatchAI/main/setup.sh | bash
+# Usage: curl -sSL https://raw.githubusercontent.com/udayak/NetWatchAI/main/setup.sh | bash
 
 set -e
 

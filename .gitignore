@@ -21,3 +21,22 @@ data/packets.csv
 # OS
 .DS_Store
 Thumbs.db
+
+# MkDocs build output
+site/
+
+# NetWatchAI runtime data (generated on first boot — never commit)
+data/netwatchai.db
+data/config.json
+data/.password
+data/threat_intel/
+
+# Personal files — resumes, cover letters, job search, generators (not part of the project)
+Udaya_*.pdf
+Udaya_*.docx
+create_resume_*.py
+create_cover_letter_*.py
+resume_optimized.md
+job_links.html
+linkedin_*.md
+social_media_plan.md

@@ -3,29 +3,31 @@ Comprehensive automated tests for the entire NetWatchAI application.
 Covers every module, config file, edge case, and end-to-end flow.
 """
 
-import os
 import csv
 import json
-import math
+import os
 import tempfile
-import shutil
 
-import pandas as pd
-import numpy as np
-import pytest
 import joblib
+import pandas as pd
+import pytest
 from sklearn.ensemble import IsolationForest
-from sklearn.preprocessing import LabelEncoder
 
-from src.utils import (
-    PROJECT_ROOT, DATA_DIR, MODELS_DIR, PACKETS_CSV,
-    SAMPLE_CSV, MODEL_PATH, CSV_COLUMNS, setup_logger, ensure_dirs,
-)
-from src.feature_extractor import extract_features
-from src.sniffer import PacketSniffer
-from src.model import load_and_prepare_data, train_model
 from src.detector import AnomalyDetector
-
+from src.feature_extractor import extract_features
+from src.model import load_and_prepare_data, train_model
+from src.sniffer import PacketSniffer
+from src.utils import (
+    CSV_COLUMNS,
+    DATA_DIR,
+    MODEL_PATH,
+    MODELS_DIR,
+    PACKETS_CSV,
+    PROJECT_ROOT,
+    SAMPLE_CSV,
+    ensure_dirs,
+    setup_logger,
+)
 
 # ════════════════════════════════════════════════════════════
 #  1. src/utils.py — Paths, Logger, Dirs
@@ -134,7 +136,7 @@ class TestFeatureExtractor:
         return pkt
 
     def _make_icmp(self, payload=b""):
-        from scapy.layers.inet import IP, ICMP
+        from scapy.layers.inet import ICMP, IP
         from scapy.packet import Raw
         pkt = IP(src="10.0.0.1", dst="10.0.0.2") / ICMP()
         if payload:
@@ -182,7 +184,7 @@ class TestFeatureExtractor:
         assert f["packet_size"] > 5000
 
     def test_non_ip_returns_none(self):
-        from scapy.layers.l2 import Ether, ARP
+        from scapy.layers.l2 import ARP, Ether
         pkt = Ether() / ARP()
         assert extract_features(pkt) is None
 
@@ -245,7 +247,7 @@ class TestSniffer:
             assert df.iloc[0]["src_ip"] == "1.2.3.4"
 
     def test_non_ip_skipped(self):
-        from scapy.layers.l2 import Ether, ARP
+        from scapy.layers.l2 import ARP, Ether
         with tempfile.TemporaryDirectory() as tmpdir:
             csv_path = os.path.join(tmpdir, "test.csv")
             sniffer = PacketSniffer(output_path=csv_path)
@@ -1117,7 +1119,7 @@ class TestEndToEnd:
             assert n_anomalies > 0  # sample data should have some anomalies
 
     def test_capture_write_then_detect(self):
-        from scapy.layers.inet import IP, TCP, UDP, ICMP
+        from scapy.layers.inet import ICMP, IP, TCP, UDP
         with tempfile.TemporaryDirectory() as tmpdir:
             csv_path = os.path.join(tmpdir, "packets.csv")
             sniffer = PacketSniffer(output_path=csv_path)

@@ -1,8 +1,7 @@
 """Tests for src/sniffer.py — packet sniffer CSV handling."""
 
-import os
 import csv
-import pytest
+import os
 
 from src.sniffer import PacketSniffer
 from src.utils import CSV_COLUMNS

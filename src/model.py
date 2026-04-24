@@ -12,12 +12,12 @@ The model is unsupervised — it doesn't need labeled data to learn.
 We use labels in the sample dataset only for evaluation purposes.
 """
 
-import pandas as pd
 import joblib
+import pandas as pd
 from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import LabelEncoder
 
-from src.utils import SAMPLE_CSV, MODEL_PATH, setup_logger, ensure_dirs
+from src.utils import MODEL_PATH, SAMPLE_CSV, ensure_dirs, setup_logger
 
 logger = setup_logger(__name__)
 

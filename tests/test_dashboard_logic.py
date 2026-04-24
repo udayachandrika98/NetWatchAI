@@ -4,11 +4,8 @@ We import only the pure functions (not the Streamlit UI code) by
 extracting them or testing their logic directly.
 """
 
-import os
-import math
 import pandas as pd
 import pytest
-
 
 # ── classify_attack tests ────────────────────────
 # We replicate the function here to test it without importing Streamlit

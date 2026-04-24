@@ -8,13 +8,14 @@ Usage (requires root/sudo on macOS):
     sudo python -m src.sniffer --iface en0 --count 50
 """
 
-import os
-import csv
 import argparse
+import csv
+import os
+
 from scapy.all import sniff
 
 from src.feature_extractor import extract_features
-from src.utils import PACKETS_CSV, CSV_COLUMNS, ensure_dirs, setup_logger
+from src.utils import CSV_COLUMNS, PACKETS_CSV, ensure_dirs, setup_logger
 
 logger = setup_logger(__name__)
 

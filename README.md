@@ -1,12 +1,29 @@
-# NetWatchAI — AI Network Monitoring & Intrusion Detection System
+<p align="center">
+  <img src="https://img.shields.io/badge/Python-3.11+-blue?logo=python&logoColor=white" alt="Python">
+  <img src="https://img.shields.io/badge/License-MIT-green" alt="License">
+  <img src="https://img.shields.io/badge/ML-Isolation%20Forest-orange?logo=scikit-learn&logoColor=white" alt="ML">
+  <img src="https://img.shields.io/badge/Dashboard-Streamlit-red?logo=streamlit&logoColor=white" alt="Streamlit">
+  <img src="https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker&logoColor=white" alt="Docker">
+</p>
 
-An AI-powered network monitoring tool that captures live network packets, analyzes traffic using machine learning (Isolation Forest), and displays real-time alerts in a Streamlit dashboard.
+<h1 align="center">NetWatchAI</h1>
+<p align="center"><b>AI-Powered Network Monitoring & Intrusion Detection System</b></p>
+<p align="center">
+  Captures live network packets, detects anomalies with machine learning, and shows real-time alerts in a beautiful dashboard.
+</p>
 
 ---
 
-## Quick Start (Docker — Recommended)
+<!-- Add a screenshot or GIF of your dashboard here -->
+<!-- ![Dashboard Screenshot](docs/screenshot.png) -->
 
-**Only requirement: [Docker](https://docs.docker.com/get-docker/) must be installed.**
+## Get Started — Pick Your Way
+
+> On first launch, NetWatchAI generates a random admin password and prints it to the console.
+> Override it anytime by setting the `NETWATCHAI_PASSWORD` environment variable, or rotate it
+> from **Settings → Session & Security** in the dashboard.
+
+### Option 1: Docker (Recommended)
 
 ```bash
 docker run -d -p 8501:8501 --name netwatchai udayak/netwatchai:latest
@@ -14,100 +31,264 @@ docker run -d -p 8501:8501 --name netwatchai udayak/netwatchai:latest
 
 Open **http://localhost:8501** — done.
 
+### Option 2: pip install
+
 ```bash
-# Stop it
-docker stop netwatchai
-
-# Start it again
-docker start netwatchai
-
-# Remove it completely
-docker rm -f netwatchai
+pip install netwatchai
+netwatchai-train              # Train the model
+netwatchai-dashboard          # Launch dashboard
 ```
 
----
+### Option 3: pip install from GitHub (latest)
 
-## Alternative: Run from Source
+```bash
+pip install git+https://github.com/udayak/NetWatchAI.git
+netwatchai-train && netwatchai-dashboard
+```
 
-<details>
-<summary>Click to expand (for developers who want to modify the code)</summary>
+### Option 4: One-Line Script
 
-### 1. Clone & install
+```bash
+curl -sSL https://raw.githubusercontent.com/udayak/NetWatchAI/main/setup.sh | bash
+```
+
+Auto-installs Docker if needed, pulls the image, and opens the dashboard in your browser.
+
+### Option 5: GitHub Codespaces (Zero Install — Runs in Browser)
+
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/udayak/NetWatchAI)
+
+Click the button above. A full dev environment opens in your browser with the dashboard running automatically. No install, no setup.
+
+### Option 6: VS Code DevContainer
+
+1. Install [Dev Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers)
+2. Open this repo in VS Code
+3. Click **"Reopen in Container"** when prompted
+
+Dashboard starts automatically on port 8501.
+
+### Option 7: Run from Source
 
 ```bash
 git clone https://github.com/udayak/NetWatchAI.git
 cd NetWatchAI
 python3 -m venv venv
-source venv/bin/activate
+source venv/bin/activate      # Windows: venv\Scripts\activate
 pip install -r requirements.txt
+python train.py               # Train the ML model
+streamlit run dashboard.py    # Launch dashboard
 ```
 
-### 2. Train the model
+### Option 8: Docker Compose
 
 ```bash
-python train.py
+git clone https://github.com/udayak/NetWatchAI.git
+cd NetWatchAI
+docker compose up -d
 ```
 
-### 3. Launch the dashboard
+Open **http://localhost:8501**.
 
-```bash
-streamlit run dashboard.py
-```
+<details>
+<summary><b>Quick comparison — which option should I pick?</b></summary>
 
-### 4. Capture live packets (optional, requires sudo)
-
-```bash
-sudo python capture.py --count 50 --detect
-```
+| Option | Best For | Needs Install? | Time to Start |
+|--------|----------|---------------|---------------|
+| Docker | Most users | Docker only | ~30 sec |
+| pip install | Python developers | Python 3.11+ | ~1 min |
+| pip from GitHub | Latest unreleased code | Python 3.11+ | ~1 min |
+| One-line script | First-time users | Nothing (auto-installs) | ~1 min |
+| GitHub Codespaces | Try without installing anything | Nothing | ~2 min |
+| VS Code DevContainer | Developers with VS Code | VS Code + Docker | ~2 min |
+| From source | Contributors / customizers | Python 3.11+ | ~2 min |
+| Docker Compose | Multi-service setups | Docker | ~1 min |
 
 </details>
 
 ---
 
-## What It Does
+## How It Works
+
+```
+Network Traffic → Scapy Capture → Feature Extraction → ML Model → Dashboard
+```
 
 ```
 ┌─────────────┐    ┌──────────────┐    ┌───────────┐    ┌──────────┐    ┌───────────┐
-│   Scapy     │───>│   Feature    │───>│    CSV    │───>│ ML Model │───>│ Streamlit │
-│   Packet    │    │  Extractor   │    │  Storage  │    │ (sklearn)│    │ Dashboard │
-│   Capture   │    │              │    │           │    │          │    │           │
+│   Scapy     │───>│   Feature    │───>│    CSV    │───>│ Isolation│───>│ Streamlit │
+│   Packet    │    │  Extractor   │    │  Storage  │    │  Forest  │    │ Dashboard │
+│   Capture   │    │              │    │           │    │  Model   │    │           │
 └─────────────┘    └──────────────┘    └───────────┘    └──────────┘    └───────────┘
-  sniffer.py      feature_extractor.py  data/*.csv      model.py       dashboard.py
 ```
 
-1. **Captures** live packets from your network using Scapy
-2. **Extracts** features — IPs, ports, protocol, size, TCP flags
-3. **Detects anomalies** using an Isolation Forest ML model
-4. **Classifies attacks** — Port Scan, Ping of Death, Data Exfiltration, DNS Anomaly, etc.
-5. **Displays** real-time dashboard with threat level, alerts, charts, and network info
+1. **Capture** — Sniffs live packets from your network using Scapy
+2. **Extract** — Pulls 8 features per packet: IPs, ports, protocol, size, TCP flags
+3. **Detect** — Isolation Forest ML model flags anomalies (unsupervised — no labeled data needed)
+4. **Classify** — Rule-based classification into specific attack types
+5. **Display** — Real-time dashboard with alerts, charts, maps, and PDF reports
 
 ---
 
-## Dashboard Features
+## Dashboard Tabs
 
-| Tab | What It Shows |
-|-----|--------------|
-| Alerts | Anomaly list + full packet log with filters |
-| Attack Types | Pie chart + descriptions of detected attack types |
-| Top Attackers | Ranked source/destination IPs with attack counts |
-| Timeline | Packets over time (normal vs anomaly) |
-| Statistics | Protocol distribution, packet size histogram |
-| Network Info | WiFi SSID, signal strength, IPs, DNS, gateway |
+| Tab | What You See |
+|-----|-------------|
+| **Alerts** | Anomaly list with threat level + full packet log with pagination & filters |
+| **Attack Types** | Pie chart breakdown + descriptions of each attack type |
+| **Top Attackers** | Ranked source/destination IPs with attack counts |
+| **Timeline** | Area chart of normal vs anomaly traffic over time |
+| **Statistics** | Protocol distribution, packet size histogram, normal vs anomaly bar chart |
+| **Network Info** | WiFi SSID, signal strength, local/public IP, gateway, DNS, MAC (cross-platform) |
+| **Attack Map** | World map with geolocated attacker IPs (batch GeoIP lookup) |
+| **PDF Report** | Download a professional security report with executive summary & recommendations |
+| **Settings** | Configure Discord / Slack / email alerts, allowlist, retention, rotate password, view audit log, export data |
 
 **Threat Levels:** GREEN (0-5%) → YELLOW (5-15%) → ORANGE (15-30%) → RED (>30% anomaly rate)
 
 ---
 
+## Configure Alerts (Free Channels)
+
+Open **Settings → Alert Channels** in the dashboard.
+
+- **Discord webhook:** Server Settings → Integrations → Webhooks → New Webhook → copy URL.
+- **Slack webhook:** [api.slack.com/messaging/webhooks](https://api.slack.com/messaging/webhooks) — one-click install.
+- **Email (free via Gmail SMTP):** host `smtp.gmail.com`, port `587`, your Gmail address, and a 16-char Google App Password. 500 emails/day free.
+
+Set a **minimum severity** so you only get paged for real threats. Use **Send test alert** to verify each channel.
+
+---
+
+## False Positives and Allowlists
+
+Click **False positive** next to any stored alert to suppress it and record the correction.
+Click **Allowlist** to immediately stop all future alerts from that source IP.
+Manage the allowlist any time under **Settings → Allowlist**.
+
+---
+
 ## Detectable Attacks
 
-| Attack | How It's Detected |
-|--------|------------------|
-| Port Scan | TCP SYN packets to multiple ports |
-| Ping of Death | ICMP packets > 1000 bytes |
-| Data Exfiltration | Large transfers to suspicious ports (4444, 31337) |
-| Suspicious Port | Traffic to known backdoor ports |
-| DNS Anomaly | UDP port 53 with unusual size |
-| Large Transfer | Packets > 5000 bytes |
+| Attack | Detection Method |
+|--------|-----------------|
+| **Port Scan** | TCP SYN-only packets to multiple ports |
+| **Ping of Death** | ICMP packets > 1000 bytes |
+| **Data Exfiltration** | Large transfers to suspicious ports (4444, 31337) |
+| **Suspicious Port** | Traffic on known backdoor ports (1337, 5555, 6666, etc.) |
+| **DNS Anomaly** | UDP port 53 with unusual packet size |
+| **Large Transfer** | Packets exceeding 5000 bytes |
+
+---
+
+## Why NetWatchAI Over Other Tools?
+
+There are great IDS tools out there. Here's how NetWatchAI compares:
+
+### Feature Comparison
+
+| Feature | NetWatchAI | Snort | Suricata | Zeek | Wazuh | Security Onion |
+|---------|-----------|-------|----------|------|-------|----------------|
+| ML anomaly detection | **Yes** | No | No | No | No | No |
+| Built-in dashboard | **Yes** | No | No | No | Needs Kibana | Needs Kibana |
+| PDF reports | **Yes** | No | No | No | No | No |
+| GeoIP attack map | **Yes** | No | No | No | Plugin | Plugin |
+| pip installable | **Yes** | No | No | No | No | No |
+| Docker one-command | **Yes** | Community | Community | Community | Yes | No (ISO) |
+| Python-native | **Yes** | C/C++ | C/Rust | C++ | C/Python | Mixed |
+| Setup time | **~30 sec** | Hours | Hours | Hours | 30+ min | 1+ hour |
+| Cross-platform | **macOS/Linux/Win** | Linux | Linux | Linux | Linux/Win | Linux only |
+| Signature/rule-based | No | Yes (30K+ rules) | Yes | Via scripts | Yes | Yes |
+| Enterprise scale | Small networks | Enterprise | Enterprise | Enterprise | Enterprise | Enterprise |
+| Blocks traffic (IPS) | No | Yes | Yes | No | Via agent | Yes |
+
+### What Each Tool Is Best At
+
+| Tool | Best For | Limitation |
+|------|----------|-----------|
+| **Snort** | Enterprise rule-based detection | No ML, no dashboard, complex setup |
+| **Suricata** | High-speed multi-threaded IDS | Needs ELK stack for UI, no ML |
+| **Zeek** | Deep protocol analysis & forensics | Steep learning curve, no alerting UI |
+| **Wazuh** | Host-based monitoring + compliance | Not a network packet IDS |
+| **Security Onion** | Full SOC platform (Suricata+Zeek+ELK) | Needs dedicated hardware, 16GB+ RAM |
+| **NetWatchAI** | **Lightweight ML-based detection + instant dashboard** | Not for high-throughput enterprise networks |
+
+### NetWatchAI's Unique Advantages
+
+**1. ML-first detection (no other production IDS has this)**
+Snort and Suricata only catch **known** attacks via signatures. NetWatchAI's Isolation Forest catches **unknown/zero-day** patterns by learning what normal traffic looks like and flagging anything unusual.
+
+**2. Zero-config setup**
+```bash
+# NetWatchAI — 30 seconds
+docker run -d -p 8501:8501 udayak/netwatchai:latest
+
+# Suricata + ELK — you need all of this:
+# Install Suricata → Configure YAML → Download rules → Install Elasticsearch
+# → Install Kibana → Configure index patterns → Import dashboards
+```
+
+**3. All-in-one package**
+Others need 4 separate tools: Suricata (detect) + Zeek (analyze) + Elasticsearch (store) + Kibana (view). NetWatchAI does capture + ML detection + dashboard + reports in **one package**.
+
+**4. Python-native = easy to extend**
+Security researchers and data scientists can read the code, swap ML models, add features. No C/C++ knowledge required.
+
+### Who Should Use What
+
+| If you need... | Use |
+|---------------|-----|
+| Quick ML-based monitoring for small network / home lab / learning | **NetWatchAI** |
+| Enterprise IDS with 30K+ signature rules | Snort or Suricata |
+| Deep protocol forensics and threat hunting | Zeek |
+| Host-based monitoring + compliance (PCI-DSS, HIPAA) | Wazuh |
+| Full SOC platform with everything bundled | Security Onion |
+
+---
+
+## Live Packet Capture
+
+To capture real network traffic (requires admin/root privileges):
+
+**Local:**
+```bash
+sudo python capture.py --count 100 --detect
+```
+
+**Docker:**
+```bash
+# Terminal 1: Capture packets
+docker run -d --name netwatchai-capture \
+  --network host --cap-add NET_ADMIN --cap-add NET_RAW \
+  -v $(pwd)/data:/app/data \
+  udayak/netwatchai:latest \
+  python capture.py --count 0 --detect
+
+# Terminal 2: View dashboard
+docker run -d -p 8501:8501 \
+  -v $(pwd)/data:/app/data \
+  --name netwatchai udayak/netwatchai:latest
+```
+
+**Capture options:**
+| Flag | Description | Example |
+|------|-------------|---------|
+| `--count N` | Number of packets (0 = unlimited) | `--count 500` |
+| `--iface` | Network interface | `--iface en0` |
+| `--filter` | BPF filter expression | `--filter "tcp port 80"` |
+| `--detect` | Run anomaly detection in real-time | `--detect` |
+
+---
+
+## CLI Commands
+
+After `pip install -e .` you get these commands:
+
+```bash
+netwatchai-train      # Train the ML model
+netwatchai-capture    # Start packet capture
+netwatchai-dashboard  # Launch the dashboard
+```
 
 ---
 
@@ -115,23 +296,30 @@ sudo python capture.py --count 50 --detect
 
 ```
 NetWatchAI/
-├── Dockerfile             ← Container build file
-├── docker-compose.yml     ← One-command deployment
-├── setup.sh               ← Auto-setup script
-├── requirements.txt       ← Python dependencies
-├── train.py               ← Train the ML model
-├── capture.py             ← Capture live packets
-├── dashboard.py           ← Streamlit dashboard
+├── train.py               # Train the ML model
+├── capture.py             # Capture live packets
+├── dashboard.py           # Streamlit dashboard (main UI)
+├── evaluate.py            # Benchmark against NSL-KDD dataset
+│
+├── src/                   # Core library
+│   ├── feature_extractor.py  # Extract features from raw packets
+│   ├── sniffer.py            # Packet capture with Scapy
+│   ├── model.py              # Isolation Forest training
+│   ├── detector.py           # Anomaly detection/prediction
+│   ├── utils.py              # Shared paths & helpers
+│   └── cli.py                # CLI entry points
+│
 ├── data/
-│   └── sample_packets.csv ← Sample training dataset (228 packets)
+│   └── sample_packets.csv    # Sample training data (228 packets)
 ├── models/
-│   └── model.pkl          ← Trained model (created after training)
-└── src/
-    ├── utils.py            ← Shared paths, logging helpers
-    ├── feature_extractor.py← Extract features from raw packets
-    ├── sniffer.py          ← Live packet capture with Scapy
-    ├── model.py            ← Train Isolation Forest model
-    └── detector.py         ← Load model & predict anomalies
+│   └── model.pkl             # Trained model (auto-generated)
+├── tests/                    # 300+ tests with pytest
+│
+├── Dockerfile                # Container build
+├── docker-compose.yml        # Docker Compose setup
+├── setup.sh                  # One-line installer script
+├── requirements.txt          # Python dependencies
+└── pyproject.toml            # Package config
 ```
 
 ---
@@ -140,38 +328,68 @@ NetWatchAI/
 
 | Component | Technology |
 |-----------|-----------|
-| Language | Python 3.11 |
-| Packet Capture | Scapy |
-| Machine Learning | scikit-learn (Isolation Forest) |
-| Data Processing | pandas |
-| Dashboard | Streamlit |
-| Charts | Plotly |
-| Deployment | Docker |
+| Language | Python 3.11+ |
+| Packet Capture | [Scapy](https://scapy.net/) |
+| Machine Learning | [scikit-learn](https://scikit-learn.org/) (Isolation Forest) |
+| Data Processing | [pandas](https://pandas.pydata.org/) |
+| Dashboard | [Streamlit](https://streamlit.io/) |
+| Charts | [Plotly](https://plotly.com/python/) |
+| GeoIP | [ip-api.com](http://ip-api.com/) (free, no key) |
+| PDF Reports | [fpdf2](https://py-pdf.github.io/fpdf2/) |
+| Deployment | [Docker](https://www.docker.com/) |
 
 ---
 
-## Live Packet Capture (Advanced)
+## Model Performance
 
-To capture real network traffic inside Docker:
+Benchmarked on the [NSL-KDD](https://www.unb.ca/cic/datasets/nsl.html) dataset (125K training / 22.5K test samples):
+
+| Model | Accuracy | Precision | Recall | F1-Score | Training Time |
+|-------|----------|-----------|--------|----------|---------------|
+| **Isolation Forest** (used) | 57.6% | 87.3% | 29.8% | 44.5% | 0.38s |
+| Random Forest | 77.0% | 96.6% | 61.7% | 75.3% | 3.2s |
+| Decision Tree | 79.4% | 96.5% | 66.2% | 78.5% | 0.8s |
+| SVM | 78.1% | 97.6% | 63.1% | 76.7% | 45s |
+
+> Isolation Forest is **unsupervised** (no labels needed) with high precision. Run `python evaluate.py` to reproduce.
+
+---
+
+## Configuration
+
+| Setting | How to Change |
+|---------|--------------|
+| Dashboard password | `NETWATCHAI_PASSWORD=mypass streamlit run dashboard.py` |
+| Streamlit theme | Edit `.streamlit/config.toml` |
+| Model parameters | Edit `src/model.py` (contamination, n_estimators) |
+| Suspicious ports | Edit `SUSPICIOUS_PORTS` in `dashboard.py` |
+
+---
+
+## Contributing
+
+Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ```bash
-docker run -d \
-  --name netwatchai-capture \
-  --network host \
-  --cap-add NET_ADMIN \
-  --cap-add NET_RAW \
-  -v $(pwd)/data:/app/data \
-  udayak/netwatchai:latest \
-  python capture.py --count 0 --detect
-```
-
-Then run the dashboard separately to view results:
-```bash
-docker run -d -p 8501:8501 -v $(pwd)/data:/app/data --name netwatchai udayak/netwatchai:latest
+# Dev setup
+git clone https://github.com/udayak/NetWatchAI.git
+cd NetWatchAI
+python3 -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+python train.py
+pytest                    # Run 300+ tests
+streamlit run dashboard.py
 ```
 
 ---
 
 ## License
 
-This project is for educational purposes.
+MIT License - see [LICENSE](LICENSE) for details.
+
+---
+
+<p align="center">
+  <b>NetWatchAI</b> — AI-Powered Network Intrusion Detection<br>
+  Built by <a href="https://github.com/udayak">Udaya K</a>
+</p>

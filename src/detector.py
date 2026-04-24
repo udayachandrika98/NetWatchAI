@@ -7,8 +7,8 @@ Prediction values:
   -1  = anomaly (suspicious/malicious)
 """
 
-import pandas as pd
 import joblib
+import pandas as pd
 
 from src.utils import MODEL_PATH, setup_logger
 
@@ -70,7 +70,8 @@ class AnomalyDetector:
             # Handle unseen categories: replace with "OTHER" or first known class
             known_classes = set(encoder.classes_)
             df[col] = df[col].apply(
-                lambda x: x if x in known_classes else encoder.classes_[0]
+                lambda x, _known=known_classes, _fallback=encoder.classes_[0]:
+                    x if x in _known else _fallback
             )
             df[col] = encoder.transform(df[col])
 

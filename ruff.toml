@@ -1,0 +1,25 @@
+line-length = 110
+target-version = "py311"
+exclude = ["venv", ".venv", "dist", "build", "__pycache__", "create_*.py"]
+
+[lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # bugbear
+    "UP",  # pyupgrade
+    "W",   # pycodestyle warnings
+]
+ignore = [
+    "E501",  # Long lines — Streamlit markdown strings are often long
+    "B008",  # Function call in default arg (common in FastAPI-style code)
+]
+
+[lint.per-file-ignores]
+# Tests intentionally instantiate classes for side-effects (CSV creation, etc.)
+# and are less strict on import/order/bugbear rules than production code.
+"tests/*" = ["B", "E", "F841"]
+# Dashboard uses intentional compact single-line conditionals for readability,
+# and splits imports across section-header comments.
+"dashboard.py" = ["E402", "E701", "I001", "F401"]

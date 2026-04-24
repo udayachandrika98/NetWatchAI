@@ -8,7 +8,6 @@ Usage:
 
 import os
 import io
-import re
 import json
 import subprocess
 import socket
@@ -23,21 +22,160 @@ import requests
 from fpdf import FPDF
 from src.detector import AnomalyDetector
 from src.utils import PACKETS_CSV, SAMPLE_CSV, MODEL_PATH
+from src import storage, auth, alerting, config as app_config, threat_intel, behavior
+
+storage.init_db()
+
+
+# Threat-intel: refresh once per day on the first dashboard render.
+# Cached at the module level so subsequent renders are instant.
+@st.cache_resource(ttl=86400, show_spinner=False)
+def _load_threat_intel():
+    threat_intel.refresh_if_stale(force=False)
+    return threat_intel.load_iocs()
 
 
 # ──────────────────────────────────────────────
 # Network Info Helper
 # ──────────────────────────────────────────────
 
-def get_network_info():
-    """Collect WiFi and network details from the system."""
-    info = {}
+import platform
+
+def _run_cmd(cmd, timeout=5):
+    """Run a shell command and return stdout, or empty string on failure."""
     try:
-        result = subprocess.run(["networksetup", "-getairportnetwork", "en0"], capture_output=True, text=True, timeout=5)
-        line = result.stdout.strip()
-        info["WiFi Network (SSID)"] = line.split(": ", 1)[1] if ": " in line else "Not connected"
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return result.stdout.strip()
     except Exception:
-        info["WiFi Network (SSID)"] = "N/A"
+        return ""
+
+def _get_network_info_darwin(info):
+    """macOS-specific network info."""
+    out = _run_cmd(["networksetup", "-getairportnetwork", "en0"])
+    info["WiFi Network (SSID)"] = out.split(": ", 1)[1] if ": " in out else "Not connected"
+
+    out = _run_cmd(["route", "-n", "get", "default"])
+    for line in out.splitlines():
+        if "gateway" in line.lower():
+            info["Gateway (Router)"] = line.split(":", 1)[1].strip()
+            break
+
+    out = _run_cmd(["scutil", "--dns"])
+    dns_servers = []
+    for line in out.splitlines():
+        if "nameserver" in line.lower():
+            server = line.split(":", 1)[1].strip()
+            if server not in dns_servers:
+                dns_servers.append(server)
+            if len(dns_servers) >= 3:
+                break
+    if dns_servers:
+        info["DNS Servers"] = ", ".join(dns_servers)
+
+    out = _run_cmd(["ifconfig", "en0"])
+    for line in out.splitlines():
+        if "ether" in line:
+            info["MAC Address"] = line.strip().split()[1]
+        if "inet " in line and "netmask" in line:
+            parts = line.strip().split()
+            mask_idx = parts.index("netmask") if "netmask" in parts else -1
+            if mask_idx > 0:
+                info["Subnet Mask"] = parts[mask_idx + 1]
+
+    out = _run_cmd(["/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport", "-I"])
+    for line in out.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("agrCtlRSSI"):
+            rssi = int(stripped.split(":")[1].strip())
+            strength = "Excellent" if rssi > -50 else "Good" if rssi > -60 else "Fair" if rssi > -70 else "Weak"
+            info["Signal Strength"] = f"{rssi} dBm ({strength})"
+        if stripped.startswith("lastTxRate"):
+            info["Link Speed"] = stripped.split(":")[1].strip() + " Mbps"
+        if stripped.startswith("channel"):
+            info["Channel"] = stripped.split(":")[1].strip()
+
+def _get_network_info_linux(info):
+    """Linux-specific network info."""
+    out = _run_cmd(["iwgetid", "-r"])
+    info["WiFi Network (SSID)"] = out if out else "Not connected"
+
+    out = _run_cmd(["ip", "route", "show", "default"])
+    if "via" in out:
+        info["Gateway (Router)"] = out.split("via")[1].strip().split()[0]
+
+    out = _run_cmd(["cat", "/etc/resolv.conf"])
+    dns_servers = []
+    for line in out.splitlines():
+        if line.strip().startswith("nameserver"):
+            server = line.strip().split()[1]
+            if server not in dns_servers:
+                dns_servers.append(server)
+            if len(dns_servers) >= 3:
+                break
+    if dns_servers:
+        info["DNS Servers"] = ", ".join(dns_servers)
+
+    out = _run_cmd(["ip", "link", "show"])
+    import re as _re
+    mac_match = _re.search(r"link/ether\s+([\da-f:]+)", out)
+    if mac_match:
+        info["MAC Address"] = mac_match.group(1)
+
+    out = _run_cmd(["ip", "addr", "show"])
+    for line in out.splitlines():
+        if "inet " in line and "127.0.0.1" not in line:
+            parts = line.strip().split()
+            if "/" in parts[1]:
+                cidr = int(parts[1].split("/")[1])
+                mask = ".".join(str((0xFFFFFFFF << (32 - cidr) >> i) & 0xFF) for i in [24, 16, 8, 0])
+                info["Subnet Mask"] = mask
+            break
+
+    out = _run_cmd(["iwconfig"])
+    import re as _re
+    rssi_match = _re.search(r"Signal level[=:](-?\d+)", out)
+    if rssi_match:
+        rssi = int(rssi_match.group(1))
+        strength = "Excellent" if rssi > -50 else "Good" if rssi > -60 else "Fair" if rssi > -70 else "Weak"
+        info["Signal Strength"] = f"{rssi} dBm ({strength})"
+    rate_match = _re.search(r"Bit Rate[=:](\S+)", out)
+    if rate_match:
+        info["Link Speed"] = rate_match.group(1) + " Mbps"
+
+def _get_network_info_windows(info):
+    """Windows-specific network info."""
+    out = _run_cmd(["netsh", "wlan", "show", "interfaces"])
+    for line in out.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("SSID") and "BSSID" not in stripped:
+            info["WiFi Network (SSID)"] = stripped.split(":", 1)[1].strip()
+        if "Signal" in stripped:
+            info["Signal Strength"] = stripped.split(":", 1)[1].strip()
+        if "Radio type" in stripped:
+            info["Channel"] = stripped.split(":", 1)[1].strip()
+        if "Receive rate" in stripped:
+            info["Link Speed"] = stripped.split(":", 1)[1].strip()
+
+    out = _run_cmd(["ipconfig", "/all"])
+    for line in out.splitlines():
+        stripped = line.strip()
+        if "Default Gateway" in stripped and ":" in stripped:
+            gw = stripped.split(":", 1)[1].strip()
+            if gw:
+                info["Gateway (Router)"] = gw
+        if "DNS Servers" in stripped:
+            dns = stripped.split(":", 1)[1].strip()
+            if dns:
+                info["DNS Servers"] = dns
+        if "Physical Address" in stripped:
+            info["MAC Address"] = stripped.split(":", 1)[1].strip()
+        if "Subnet Mask" in stripped:
+            info["Subnet Mask"] = stripped.split(":", 1)[1].strip()
+
+def get_network_info():
+    """Collect WiFi and network details from the system (cross-platform)."""
+    info = {}
+    # Local IP — works on all platforms
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
@@ -47,62 +185,30 @@ def get_network_info():
             s.close()
     except Exception:
         info["Local IP"] = "N/A"
-    try:
-        result = subprocess.run(["route", "-n", "get", "default"], capture_output=True, text=True, timeout=5)
-        for line in result.stdout.splitlines():
-            if "gateway" in line.lower():
-                info["Gateway (Router)"] = line.split(":", 1)[1].strip()
-                break
-    except Exception:
-        info["Gateway (Router)"] = "N/A"
-    try:
-        result = subprocess.run(["scutil", "--dns"], capture_output=True, text=True, timeout=5)
-        dns_servers = []
-        for line in result.stdout.splitlines():
-            if "nameserver" in line.lower():
-                server = line.split(":", 1)[1].strip()
-                if server not in dns_servers:
-                    dns_servers.append(server)
-                if len(dns_servers) >= 3:
-                    break
-        info["DNS Servers"] = ", ".join(dns_servers) if dns_servers else "N/A"
-    except Exception:
-        info["DNS Servers"] = "N/A"
-    try:
-        result = subprocess.run(["ifconfig", "en0"], capture_output=True, text=True, timeout=5)
-        for line in result.stdout.splitlines():
-            if "ether" in line:
-                info["MAC Address"] = line.strip().split()[1]
-            if "inet " in line and "broadcast" in line:
-                parts = line.strip().split()
-                mask_idx = parts.index("netmask") if "netmask" in parts else -1
-                if mask_idx > 0:
-                    info["Subnet Mask"] = parts[mask_idx + 1]
-    except Exception:
-        pass
-    try:
-        result = subprocess.run(
-            ["/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport", "-I"],
-            capture_output=True, text=True, timeout=5,
-        )
-        for line in result.stdout.splitlines():
-            stripped = line.strip()
-            if stripped.startswith("agrCtlRSSI"):
-                rssi = int(stripped.split(":")[1].strip())
-                strength = "Excellent" if rssi > -50 else "Good" if rssi > -60 else "Fair" if rssi > -70 else "Weak"
-                info["Signal Strength"] = f"{rssi} dBm ({strength})"
-            if stripped.startswith("lastTxRate"):
-                info["Link Speed"] = stripped.split(":")[1].strip() + " Mbps"
-            if stripped.startswith("channel"):
-                info["Channel"] = stripped.split(":")[1].strip()
-    except Exception:
-        info["Signal Strength"] = "N/A"
+
+    # Platform-specific details
+    system = platform.system()
+    if system == "Darwin":
+        _get_network_info_darwin(info)
+    elif system == "Linux":
+        _get_network_info_linux(info)
+    elif system == "Windows":
+        _get_network_info_windows(info)
+
+    # Defaults for missing keys
+    for key in ["WiFi Network (SSID)", "Signal Strength", "Link Speed", "Channel",
+                 "Gateway (Router)", "DNS Servers", "MAC Address", "Subnet Mask"]:
+        info.setdefault(key, "N/A")
+
     info["Hostname"] = socket.gethostname()
+
+    # Public IP — works on all platforms
     try:
         import urllib.request
         info["Public IP"] = urllib.request.urlopen("https://api.ipify.org", timeout=3).read().decode()
     except Exception:
         info["Public IP"] = "N/A"
+
     return info
 
 
@@ -122,9 +228,10 @@ def classify_attack(row):
     except (ValueError, TypeError): src_port = 0
     try: packet_size = int(row.get("packet_size", 0))
     except (ValueError, TypeError): packet_size = 0
-    flags = str(row.get("flags", ""))
     if protocol == "ICMP" and packet_size > 1000: return "Ping of Death"
-    if protocol == "TCP" and flags == "S" and packet_size <= 60: return "Port Scan"
+    # NOTE: Port Scan is handled by the stateful detector in src/behavior.py,
+    # not per-packet. A single small TCP SYN is not a scan — 15+ distinct ports
+    # within 60 seconds is.
     if dst_port in SUSPICIOUS_PORTS or src_port in SUSPICIOUS_PORTS:
         return "Data Exfiltration" if packet_size > 1000 else "Suspicious Port"
     if packet_size > 5000: return "Large Transfer"
@@ -136,165 +243,53 @@ def classify_attack(row):
 # GeoIP Lookup
 # ──────────────────────────────────────────────
 
-@st.cache_data(ttl=3600)
-def get_ip_geolocation(ip):
-    """Get geolocation for an IP using ip-api.com (free, no key needed)."""
-    try:
-        if ip.startswith(("10.", "172.16.", "192.168.", "127.")):
-            return None
-        resp = requests.get(f"http://ip-api.com/json/{ip}?fields=status,country,countryCode,city,lat,lon,isp", timeout=3)
-        data = resp.json()
-        if data.get("status") == "success":
-            return data
-    except Exception:
-        pass
-    return None
+def _is_private_ip(ip):
+    """Check if an IP is private/local."""
+    return ip.startswith(("10.", "172.16.", "172.17.", "172.18.", "172.19.",
+                          "172.20.", "172.21.", "172.22.", "172.23.", "172.24.",
+                          "172.25.", "172.26.", "172.27.", "172.28.", "172.29.",
+                          "172.30.", "172.31.", "192.168.", "127.", "0."))
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=3600)
 def get_geo_data_for_ips(ips):
-    """Batch geolocate a list of IPs. Returns list of dicts with geo info."""
+    """Batch geolocate IPs using ip-api.com batch endpoint (up to 100 per request)."""
+    public_ips = [ip for ip in ips if not _is_private_ip(ip)]
+    if not public_ips:
+        return []
+
+    public_ips = public_ips[:100]  # ip-api.com batch limit
     results = []
-    for ip in ips[:50]:  # Limit to 50 to avoid rate limiting
-        geo = get_ip_geolocation(ip)
-        if geo:
-            geo["ip"] = ip
-            results.append(geo)
-        time.sleep(0.1)  # Rate limit: max 45 req/min for ip-api.com
+
+    # Use batch endpoint — single request for all IPs (no rate limit issues)
+    try:
+        resp = requests.post(
+            "http://ip-api.com/batch?fields=status,country,countryCode,city,lat,lon,isp,query",
+            json=public_ips,
+            timeout=10,
+        )
+        batch_results = resp.json()
+        for data in batch_results:
+            if data.get("status") == "success":
+                data["ip"] = data.pop("query", "")
+                results.append(data)
+    except Exception:
+        # Fallback to individual requests if batch fails
+        for ip in public_ips[:20]:
+            try:
+                resp = requests.get(
+                    f"http://ip-api.com/json/{ip}?fields=status,country,countryCode,city,lat,lon,isp",
+                    timeout=3,
+                )
+                data = resp.json()
+                if data.get("status") == "success":
+                    data["ip"] = ip
+                    results.append(data)
+                time.sleep(0.15)  # Rate limit: max 45 req/min
+            except Exception:
+                continue
+
     return results
 
-
-# ──────────────────────────────────────────────
-# AI Threat Analyst Chatbot
-# ──────────────────────────────────────────────
-
-def ai_threat_analyst(query, df, anomaly_df):
-    """Rule-based AI chatbot that answers questions about network traffic."""
-    query_lower = query.lower().strip()
-
-    # Greeting
-    if any(w in query_lower for w in ["hello", "hi", "hey"]):
-        return "Hello! I'm the NetWatchAI Threat Analyst. Ask me about your network traffic, attacks, or suspicious IPs."
-
-    # Help
-    if any(w in query_lower for w in ["help", "what can you"]):
-        return """I can answer questions like:
-- "How many attacks were detected?"
-- "Show me port scans"
-- "Which IP is most dangerous?"
-- "What's the threat level?"
-- "Explain DNS anomaly"
-- "Show attacks from 192.168.x.x"
-- "Summary" or "Report"
-- "What protocols are used?"
-- "Show large transfers"
-"""
-
-    # Summary / Report
-    if any(w in query_lower for w in ["summary", "report", "overview", "status"]):
-        n_total = len(df)
-        n_anom = len(anomaly_df)
-        pct = (n_anom / n_total * 100) if n_total > 0 else 0
-        attack_counts = anomaly_df["attack_type"].value_counts().to_dict() if len(anomaly_df) > 0 else {}
-        top_src = anomaly_df["src_ip"].value_counts().head(3).to_dict() if len(anomaly_df) > 0 else {}
-        response = f"**Network Security Summary**\n\n"
-        response += f"- Total packets analyzed: **{n_total:,}**\n"
-        response += f"- Anomalies detected: **{n_anom:,}** ({pct:.1f}%)\n"
-        response += f"- Unique attack types: **{len(attack_counts)}**\n\n"
-        if attack_counts:
-            response += "**Attack Breakdown:**\n"
-            for at, cnt in attack_counts.items():
-                response += f"- {at}: {cnt} occurrences\n"
-            response += "\n**Top Suspicious IPs:**\n"
-            for ip, cnt in top_src.items():
-                response += f"- `{ip}`: {cnt} attacks\n"
-        else:
-            response += "No threats detected. Your network looks clean!"
-        return response
-
-    # Threat level
-    if any(w in query_lower for w in ["threat level", "risk level", "how safe", "danger"]):
-        pct = (len(anomaly_df) / len(df) * 100) if len(df) > 0 else 0
-        if pct == 0: level = "GREEN (All Clear)"
-        elif pct < 5: level = "GREEN (Low Risk)"
-        elif pct < 15: level = "YELLOW (Medium - Suspicious Activity)"
-        elif pct < 30: level = "ORANGE (High - Active Threats)"
-        else: level = "RED (Critical - Under Attack)"
-        return f"Current threat level: **{level}**\n\nAnomaly rate: **{pct:.1f}%** ({len(anomaly_df)} out of {len(df)} packets)"
-
-    # Count attacks
-    if any(w in query_lower for w in ["how many attack", "how many anomal", "how many threat", "count attack"]):
-        return f"**{len(anomaly_df)}** anomalies detected out of **{len(df)}** total packets ({len(anomaly_df)/len(df)*100:.1f}% anomaly rate)."
-
-    # Specific attack type queries
-    attack_keywords = {
-        "port scan": "Port Scan", "portscan": "Port Scan",
-        "ping of death": "Ping of Death", "ping": "Ping of Death",
-        "data exfiltration": "Data Exfiltration", "exfiltration": "Data Exfiltration",
-        "dns anomaly": "DNS Anomaly", "dns": "DNS Anomaly",
-        "suspicious port": "Suspicious Port",
-        "large transfer": "Large Transfer",
-    }
-    for keyword, attack_type in attack_keywords.items():
-        if keyword in query_lower:
-            subset = anomaly_df[anomaly_df["attack_type"] == attack_type]
-            if len(subset) == 0:
-                return f"No **{attack_type}** attacks detected in current data."
-            top_ips = subset["src_ip"].value_counts().head(5).to_dict()
-            desc = {
-                "Port Scan": "Attackers probe open ports to find vulnerabilities. Look for TCP SYN-only packets to sequential ports.",
-                "Ping of Death": "Oversized ICMP packets (>1000 bytes) designed to crash or freeze target systems.",
-                "Data Exfiltration": "Large data transfers to suspicious ports (4444, 31337) — possible data theft.",
-                "DNS Anomaly": "Unusually large DNS queries — could indicate DNS tunneling or spoofing.",
-                "Suspicious Port": "Traffic on known backdoor ports (1337, 5555, 6666, etc.).",
-                "Large Transfer": "Packets exceeding 5000 bytes — could be unauthorized data movement.",
-            }
-            response = f"**{attack_type} — {len(subset)} detected**\n\n"
-            response += f"{desc.get(attack_type, '')}\n\n"
-            response += "**Source IPs involved:**\n"
-            for ip, cnt in top_ips.items():
-                response += f"- `{ip}`: {cnt} packets\n"
-            return response
-
-    # Query by specific IP
-    ip_match = re.search(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', query)
-    if ip_match:
-        ip = ip_match.group()
-        ip_packets = df[(df["src_ip"] == ip) | (df["dst_ip"] == ip)]
-        ip_anomalies = anomaly_df[(anomaly_df["src_ip"] == ip) | (anomaly_df["dst_ip"] == ip)]
-        if len(ip_packets) == 0:
-            return f"No traffic found for IP `{ip}`."
-        response = f"**Analysis for `{ip}`**\n\n"
-        response += f"- Total packets: **{len(ip_packets)}**\n"
-        response += f"- Anomalous packets: **{len(ip_anomalies)}**\n"
-        if len(ip_anomalies) > 0:
-            attacks = ip_anomalies["attack_type"].value_counts().to_dict()
-            response += f"- Attack types: {', '.join(f'{k} ({v})' for k, v in attacks.items())}\n"
-            response += f"\n**Verdict: This IP is suspicious.** Found in {len(ip_anomalies)} anomalous packets."
-        else:
-            response += "\n**Verdict: This IP appears clean.** No anomalous activity detected."
-        return response
-
-    # Most dangerous IP
-    if any(w in query_lower for w in ["most dangerous", "worst ip", "top attacker", "biggest threat"]):
-        if len(anomaly_df) == 0:
-            return "No threats detected. No dangerous IPs found."
-        top = anomaly_df["src_ip"].value_counts().head(1)
-        ip = top.index[0]
-        cnt = top.values[0]
-        attacks = anomaly_df[anomaly_df["src_ip"] == ip]["attack_type"].value_counts().to_dict()
-        return f"Most dangerous IP: **`{ip}`** with **{cnt}** attacks.\n\nAttack types: {', '.join(f'{k} ({v})' for k, v in attacks.items())}"
-
-    # Protocol info
-    if any(w in query_lower for w in ["protocol", "tcp", "udp", "icmp"]):
-        proto_counts = df["protocol"].value_counts().to_dict()
-        response = "**Protocol Distribution:**\n\n"
-        for proto, cnt in proto_counts.items():
-            anom_cnt = len(anomaly_df[anomaly_df["protocol"] == proto])
-            response += f"- **{proto}**: {cnt} packets ({anom_cnt} anomalies)\n"
-        return response
-
-    # Default
-    return "I'm not sure how to answer that. Try asking about:\n- Attack types (port scan, DNS anomaly, etc.)\n- Specific IPs\n- Threat level\n- Summary/report\n- Protocol distribution\n\nType **help** for more options."
 
 
 # ──────────────────────────────────────────────
@@ -306,31 +301,35 @@ def generate_pdf_report(df, anomaly_df):
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
 
-    # Title Page
+    # Title Page — deep indigo cover
     pdf.add_page()
-    pdf.set_fill_color(10, 14, 26)
+    pdf.set_fill_color(9, 9, 11)
     pdf.rect(0, 0, 210, 297, 'F')
-    pdf.set_text_color(0, 229, 255)
-    pdf.set_font("Helvetica", "B", 36)
-    pdf.ln(60)
+    # Accent band
+    pdf.set_fill_color(99, 102, 241)
+    pdf.rect(0, 0, 210, 4, 'F')
+    pdf.set_text_color(250, 250, 250)
+    pdf.set_font("Helvetica", "B", 40)
+    pdf.ln(75)
     pdf.cell(0, 20, "NetWatchAI", align="C", new_x="LMARGIN", new_y="NEXT")
-    pdf.set_font("Helvetica", "", 16)
-    pdf.set_text_color(148, 163, 184)
+    pdf.set_font("Helvetica", "", 15)
+    pdf.set_text_color(165, 180, 252)
     pdf.cell(0, 10, "Security Threat Report", align="C", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(10)
-    pdf.set_font("Helvetica", "", 12)
-    pdf.cell(0, 10, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", align="C", new_x="LMARGIN", new_y="NEXT")
-    pdf.cell(0, 10, "AI-Powered Network Monitoring & Intrusion Detection", align="C", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 11)
+    pdf.set_text_color(161, 161, 170)
+    pdf.cell(0, 8, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", align="C", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 8, "Network Monitoring and Intrusion Detection", align="C", new_x="LMARGIN", new_y="NEXT")
 
     # Executive Summary Page
     pdf.add_page()
     pdf.set_fill_color(255, 255, 255)
     pdf.rect(0, 0, 210, 297, 'F')
-    pdf.set_text_color(15, 23, 42)
+    pdf.set_text_color(29, 29, 31)
     pdf.set_font("Helvetica", "B", 22)
     pdf.cell(0, 15, "Executive Summary", new_x="LMARGIN", new_y="NEXT")
-    pdf.set_draw_color(0, 229, 255)
-    pdf.set_line_width(1)
+    pdf.set_draw_color(210, 210, 215)
+    pdf.set_line_width(0.5)
     pdf.line(10, pdf.get_y(), 200, pdf.get_y())
     pdf.ln(8)
 
@@ -338,17 +337,17 @@ def generate_pdf_report(df, anomaly_df):
     n_anom = len(anomaly_df)
     pct = (n_anom / total * 100) if total > 0 else 0
 
-    if pct == 0: level, level_color = "ALL CLEAR", (52, 211, 153)
-    elif pct < 5: level, level_color = "LOW RISK", (52, 211, 153)
-    elif pct < 15: level, level_color = "MEDIUM", (251, 191, 36)
-    elif pct < 30: level, level_color = "HIGH", (251, 146, 60)
-    else: level, level_color = "CRITICAL", (248, 113, 113)
+    if pct == 0: level, level_color = "ALL CLEAR", (30, 126, 52)
+    elif pct < 5: level, level_color = "LOW RISK", (30, 126, 52)
+    elif pct < 15: level, level_color = "MEDIUM", (178, 80, 0)
+    elif pct < 30: level, level_color = "HIGH", (178, 80, 0)
+    else: level, level_color = "CRITICAL", (194, 59, 34)
 
     pdf.set_font("Helvetica", "B", 14)
     pdf.set_text_color(*level_color)
     pdf.cell(0, 10, f"Threat Level: {level}", new_x="LMARGIN", new_y="NEXT")
 
-    pdf.set_text_color(15, 23, 42)
+    pdf.set_text_color(29, 29, 31)
     pdf.set_font("Helvetica", "", 11)
     pdf.ln(3)
     summary_items = [
@@ -367,7 +366,7 @@ def generate_pdf_report(df, anomaly_df):
         pdf.ln(8)
         pdf.set_font("Helvetica", "B", 16)
         pdf.cell(0, 12, "Attack Type Breakdown", new_x="LMARGIN", new_y="NEXT")
-        pdf.set_draw_color(124, 77, 255)
+        pdf.set_draw_color(210, 210, 215)
         pdf.line(10, pdf.get_y(), 200, pdf.get_y())
         pdf.ln(5)
 
@@ -383,7 +382,7 @@ def generate_pdf_report(df, anomaly_df):
         }
 
         pdf.set_font("Helvetica", "B", 10)
-        pdf.set_fill_color(240, 240, 250)
+        pdf.set_fill_color(245, 245, 247)
         pdf.cell(70, 8, "Attack Type", border=1, fill=True)
         pdf.cell(30, 8, "Count", border=1, fill=True, align="C")
         pdf.cell(90, 8, "Description", border=1, fill=True)
@@ -400,13 +399,13 @@ def generate_pdf_report(df, anomaly_df):
         pdf.ln(8)
         pdf.set_font("Helvetica", "B", 16)
         pdf.cell(0, 12, "Top Suspicious IPs", new_x="LMARGIN", new_y="NEXT")
-        pdf.set_draw_color(248, 113, 113)
+        pdf.set_draw_color(210, 210, 215)
         pdf.line(10, pdf.get_y(), 200, pdf.get_y())
         pdf.ln(5)
 
         top_src = anomaly_df["src_ip"].value_counts().head(10)
         pdf.set_font("Helvetica", "B", 10)
-        pdf.set_fill_color(255, 240, 240)
+        pdf.set_fill_color(245, 245, 247)
         pdf.cell(50, 8, "Source IP", border=1, fill=True)
         pdf.cell(30, 8, "Attacks", border=1, fill=True, align="C")
         pdf.cell(110, 8, "Attack Types", border=1, fill=True)
@@ -424,7 +423,7 @@ def generate_pdf_report(df, anomaly_df):
     pdf.add_page()
     pdf.set_font("Helvetica", "B", 22)
     pdf.cell(0, 15, "Recommendations", new_x="LMARGIN", new_y="NEXT")
-    pdf.set_draw_color(52, 211, 153)
+    pdf.set_draw_color(210, 210, 215)
     pdf.line(10, pdf.get_y(), 200, pdf.get_y())
     pdf.ln(8)
 
@@ -457,7 +456,7 @@ def generate_pdf_report(df, anomaly_df):
     pdf.set_font("Helvetica", "I", 8)
     pdf.set_text_color(150, 150, 150)
     pdf.set_y(-20)
-    pdf.cell(0, 10, "Generated by NetWatchAI - AI-Powered Network Intrusion Detection System", align="C")
+    pdf.cell(0, 10, "Generated by NetWatchAI. Network Intrusion Detection.", align="C")
 
     return bytes(pdf.output())
 
@@ -466,63 +465,196 @@ def generate_pdf_report(df, anomaly_df):
 # Page Config
 # ──────────────────────────────────────────────
 
-st.set_page_config(page_title="NetWatchAI", page_icon="🛡️", layout="wide")
+st.set_page_config(page_title="NetWatchAI", layout="wide")
 
 # ──────────────────────────────────────────────
 # Authentication
 # ──────────────────────────────────────────────
 
-VALID_PASSWORD = os.environ.get("NETWATCHAI_PASSWORD", "admin123")
-
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 
-if not st.session_state.authenticated:
+# Auth is entirely optional. Login screen only appears when the admin has
+# explicitly configured a password — either via NETWATCHAI_PASSWORD env var
+# (recommended for any public/server deploy) or by setting one in the UI.
+# On a fresh local install with no password set, the dashboard opens directly.
+_auth_enabled = auth.is_setup()
+_needs_setup = False  # "Create password" screen is opt-in via Settings, not forced on first run.
+
+if _auth_enabled and not st.session_state.authenticated:
     st.markdown("""
     <style>
-        @keyframes float { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-10px)} }
-        .login-wrap { text-align:center; padding:4rem 0 1rem; }
-        .login-shield {
-            font-size: 4rem;
-            animation: float 3s ease-in-out infinite;
-            display: inline-block;
-            filter: drop-shadow(0 0 20px rgba(0,229,255,0.5));
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+        * { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important; }
+        [data-testid="stIconMaterial"],
+        [data-testid="stExpanderToggleIcon"],
+        .material-icons, .material-icons-outlined,
+        .material-symbols-rounded, .material-symbols-outlined,
+        [class*="material-symbols"] {
+            font-family:
+                'Material Symbols Rounded', 'Material Symbols Outlined',
+                'Material Icons', 'Material Icons Outlined' !important;
+            font-feature-settings: 'liga' !important;
         }
+        .stApp {
+            background:
+                radial-gradient(1200px 600px at 20% -10%, rgba(99,102,241,0.18), transparent 60%),
+                radial-gradient(900px 500px at 90% 10%, rgba(139,92,246,0.12), transparent 60%),
+                #09090b;
+        }
+        #MainMenu, footer, header { visibility: hidden; }
+        .stDeployButton { display: none; }
+        .stApp, .stApp p, .stApp span, .stApp div, .stApp label { color: #e4e4e7; }
+
+        /* Hide Streamlit's default top toolbar/padding so the card is truly centered */
+        [data-testid="stToolbar"] { display: none !important; }
+        .block-container { padding-top: 2.5rem !important; max-width: 100% !important; }
+
+        .login-card {
+            max-width: 380px;
+            margin: 4.5rem auto 0;
+            padding: 2.25rem 2rem 1.75rem;
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 16px;
+            background: linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01));
+            box-shadow: 0 20px 60px rgba(0,0,0,0.4), 0 0 0 1px rgba(255,255,255,0.02) inset;
+            text-align: center;
+        }
+        .login-mark {
+            width: 52px; height: 52px; margin: 0 auto 1.1rem;
+            border-radius: 14px;
+            background: linear-gradient(135deg, #6366f1, #8b5cf6);
+            display: flex; align-items: center; justify-content: center;
+            box-shadow: 0 8px 28px rgba(99,102,241,0.35), inset 0 1px 0 rgba(255,255,255,0.2);
+        }
+        .login-mark svg { width: 26px; height: 26px; color: #fff; }
         .login-brand {
-            font-size: 2.5rem; font-weight: 900;
-            background: linear-gradient(90deg, #00e5ff, #7c4dff, #00e5ff);
-            background-size: 200% auto;
-            -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-            animation: shimmer 3s linear infinite;
-            margin: 0.5rem 0 0 0;
+            font-size: 1.75rem; font-weight: 600;
+            color: #fafafa; margin: 0;
+            letter-spacing: -0.03em; line-height: 1.15;
         }
-        @keyframes shimmer { 0%{background-position:0%} 100%{background-position:200%} }
-        .login-sub { color: #64748b; font-size:1rem; margin:0.3rem 0 0; }
-        .login-tagline {
-            display: inline-block; margin-top: 1.5rem;
-            padding: 0.4rem 1.2rem; border-radius: 20px;
-            background: rgba(0,229,255,0.08); border: 1px solid rgba(0,229,255,0.2);
-            color: #00e5ff; font-size: 0.8rem; font-weight: 500; letter-spacing: 2px;
+        .login-sub {
+            color: #a1a1aa; font-size: 0.9rem;
+            margin: 0.4rem 0 1.75rem; font-weight: 400;
+        }
+        .login-foot {
+            color: #71717a; font-size: 0.75rem;
+            margin: 1rem 0 0; line-height: 1.5;
+        }
+        [data-testid="stTextInput"] input {
+            background: rgba(255,255,255,0.04) !important;
+            border: 1px solid rgba(255,255,255,0.1) !important;
+            color: #fafafa !important;
+            border-radius: 10px !important;
+            padding: 0.65rem 0.85rem !important;
+            font-size: 0.95rem !important;
+        }
+        [data-testid="stTextInput"] input:focus {
+            border-color: #6366f1 !important;
+            box-shadow: 0 0 0 3px rgba(99,102,241,0.18) !important;
+        }
+        .stButton > button,
+        [data-testid="stFormSubmitButton"] > button {
+            background: linear-gradient(180deg, #6366f1, #4f46e5) !important;
+            color: #fff !important;
+            border: 1px solid rgba(255,255,255,0.08) !important;
+            border-radius: 10px !important;
+            font-weight: 500 !important;
+            padding: 0.6rem 1.1rem !important;
+            box-shadow: 0 1px 0 rgba(255,255,255,0.1) inset, 0 4px 14px rgba(99,102,241,0.3);
+            width: 100%;
+        }
+        .stButton > button:hover,
+        [data-testid="stFormSubmitButton"] > button:hover {
+            background: linear-gradient(180deg, #7c7df7, #5b55ea) !important;
         }
     </style>
-    <div class="login-wrap">
-        <div class="login-shield">🛡️</div>
-        <h1 class="login-brand">NetWatchAI</h1>
-        <p class="login-sub">AI-Powered Network Intrusion Detection</p>
-        <div class="login-tagline">SECURE ACCESS REQUIRED</div>
-    </div>
     """, unsafe_allow_html=True)
-    col1, col2, col3 = st.columns([1.3, 1, 1.3])
-    with col2:
-        st.markdown("<div style='height:1.5rem'></div>", unsafe_allow_html=True)
-        password = st.text_input("Password", type="password", placeholder="Enter access code")
-        st.markdown("<div style='height:0.3rem'></div>", unsafe_allow_html=True)
-        if st.button("Access Dashboard", use_container_width=True, type="primary"):
-            if password == VALID_PASSWORD:
-                st.session_state.authenticated = True
-                st.rerun()
-            else:
-                st.error("Access denied. Invalid credentials.")
+
+    _left, _center, _right = st.columns([1, 1.2, 1])
+    with _center:
+        _sub = "Create your admin password" if _needs_setup else "Network Intrusion Detection"
+        st.markdown(f"""
+        <div class="login-card">
+            <div class="login-mark">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+            </div>
+            <h1 class="login-brand">NetWatchAI</h1>
+            <p class="login-sub">{_sub}</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+        if _needs_setup:
+            # First-run: let the user pick their own password.
+            st.info(
+                "Welcome. Choose a password to protect your NetWatchAI dashboard. "
+                "It stays on this machine, hashed with PBKDF2. Minimum 6 characters."
+            )
+            with st.form("setup_form", clear_on_submit=False, border=False):
+                pw1 = st.text_input(
+                    "New password", type="password",
+                    placeholder="Choose a password (at least 6 characters)",
+                    label_visibility="collapsed",
+                )
+                pw2 = st.text_input(
+                    "Confirm password", type="password",
+                    placeholder="Type it again to confirm",
+                    label_visibility="collapsed",
+                )
+                submitted = st.form_submit_button(
+                    "Create password and continue",
+                    use_container_width=True, type="primary",
+                )
+                if submitted:
+                    if pw1 != pw2:
+                        st.error("The two passwords don't match.")
+                    elif len(pw1) < 6:
+                        st.error("Password must be at least 6 characters.")
+                    else:
+                        auth.set_password(pw1)
+                        storage.log_audit("user", "password_set")
+                        st.session_state.authenticated = True
+                        st.session_state.login_time = datetime.now()
+                        st.rerun()
+            st.markdown(
+                "<p class='login-foot'>Forgot it later? "
+                "Rotate the password anytime from <b>Settings &rarr; Session &amp; Security</b>.</p>",
+                unsafe_allow_html=True,
+            )
+        else:
+            # Normal sign-in.
+            with st.form("login_form", clear_on_submit=False, border=False):
+                password = st.text_input(
+                    "Password", type="password",
+                    placeholder="Enter your password", label_visibility="collapsed",
+                )
+                submitted = st.form_submit_button(
+                    "Sign In", use_container_width=True, type="primary",
+                )
+                if submitted:
+                    if auth.verify(password):
+                        st.session_state.authenticated = True
+                        st.session_state.login_time = datetime.now()
+                        storage.log_audit("user", "login", "success")
+                        st.rerun()
+                    else:
+                        storage.log_audit("user", "login", "failed")
+                        st.error("Invalid password.")
+
+            with st.expander("Forgot password?"):
+                st.caption(
+                    "Clicking Reset will erase your stored password. "
+                    "You'll be shown the 'Create password' screen where you can pick a new one."
+                )
+                if st.button("Reset my password", key="reset_pw_btn", use_container_width=True):
+                    auth.reset()
+                    storage.log_audit("user", "password_reset")
+                    st.rerun()
+
+            st.markdown(
+                "<p class='login-foot'>Secured session &middot; Stored as a PBKDF2 hash</p>",
+                unsafe_allow_html=True,
+            )
     st.stop()
 
 # ──────────────────────────────────────────────
@@ -531,234 +663,472 @@ if not st.session_state.authenticated:
 
 st.markdown("""
 <style>
-    /* ── Global ── */
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
-    * { font-family: 'Inter', sans-serif !important; }
+    /* Global — Linear/Vercel-inspired refined dark theme */
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap');
+    * { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important; }
 
-    .stApp {
-        background: linear-gradient(160deg, #0a0e1a 0%, #0f172a 40%, #0c1322 100%);
+    /* Preserve Streamlit's icon fonts — otherwise ligature names like
+       "arrow_down" render as literal text instead of the chevron icon. */
+    [data-testid="stIconMaterial"],
+    [data-testid="stExpanderToggleIcon"],
+    .material-icons,
+    .material-icons-outlined,
+    .material-symbols-rounded,
+    .material-symbols-outlined,
+    [class*="material-symbols"] {
+        font-family:
+            'Material Symbols Rounded',
+            'Material Symbols Outlined',
+            'Material Icons',
+            'Material Icons Outlined' !important;
+        font-feature-settings: 'liga' !important;
     }
 
-    /* Hide streamlit branding */
+    :root {
+        --bg: #09090b;
+        --bg-2: #0d0d10;
+        --panel: #111114;
+        --panel-2: #131318;
+        --border: rgba(255,255,255,0.07);
+        --border-hi: rgba(255,255,255,0.12);
+        --text: #fafafa;
+        --text-2: #a1a1aa;
+        --text-3: #71717a;
+        --accent: #6366f1;
+        --accent-2: #8b5cf6;
+        --success: #10b981;
+        --warning: #f59e0b;
+        --danger: #ef4444;
+    }
+
+    .stApp {
+        background:
+            radial-gradient(1400px 700px at 15% -15%, rgba(99,102,241,0.10), transparent 60%),
+            radial-gradient(1000px 500px at 95% 0%, rgba(139,92,246,0.07), transparent 60%),
+            linear-gradient(180deg, #0a0a0d 0%, #09090b 100%);
+        background-attachment: fixed;
+    }
+
     #MainMenu, footer, header { visibility: hidden; }
     .stDeployButton { display: none; }
 
-    /* ── Header ── */
-    .cyber-header {
-        background: linear-gradient(135deg, rgba(0,229,255,0.1), rgba(124,77,255,0.1));
-        border: 1px solid rgba(0,229,255,0.15);
-        border-radius: 16px;
-        padding: 1.5rem 2rem;
-        margin-bottom: 1.5rem;
-        position: relative;
-        overflow: hidden;
-        backdrop-filter: blur(10px);
-    }
-    .cyber-header::before {
-        content: '';
-        position: absolute; top: 0; left: 0; right: 0;
-        height: 2px;
-        background: linear-gradient(90deg, transparent, #00e5ff, #7c4dff, #00e5ff, transparent);
-        animation: scan 3s linear infinite;
-    }
-    @keyframes scan { 0%{transform:translateX(-100%)} 100%{transform:translateX(100%)} }
-    .cyber-header h1 {
-        color: #fff; font-size: 1.8rem; font-weight: 900; margin: 0;
-        text-shadow: 0 0 20px rgba(0,229,255,0.3);
-    }
-    .cyber-header .header-sub { color: #94a3b8; font-size: 0.9rem; margin: 0.2rem 0 0; }
-    .header-badge {
-        display: inline-block; margin-top: 0.5rem;
-        padding: 0.2rem 0.8rem; border-radius: 4px;
-        font-size: 0.7rem; font-weight: 700; letter-spacing: 1.5px;
-        text-transform: uppercase;
-    }
-    .badge-live { background: rgba(16,185,129,0.15); color: #34d399; border: 1px solid rgba(16,185,129,0.3); }
-    .badge-sample { background: rgba(0,229,255,0.1); color: #67e8f9; border: 1px solid rgba(0,229,255,0.2); }
+    .stApp, .stApp p, .stApp span, .stApp div, .stApp label { color: var(--text); }
+    .stMarkdown p { color: var(--text-2); }
+    code, .stMarkdown code { font-family: 'JetBrains Mono', ui-monospace, monospace !important; font-size: 0.85em; background: rgba(255,255,255,0.06); padding: 0.1em 0.35em; border-radius: 4px; }
 
-    /* ── Metric cards ── */
-    .mc {
-        background: rgba(15,23,42,0.6);
-        backdrop-filter: blur(12px);
-        border: 1px solid rgba(255,255,255,0.06);
+    /* Header */
+    .app-header {
+        padding: 1.25rem 1.5rem;
+        margin-bottom: 1.5rem;
         border-radius: 16px;
-        padding: 1.2rem 1.4rem;
+        background: linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01));
+        border: 1px solid var(--border);
         position: relative;
         overflow: hidden;
-        transition: all 0.3s ease;
     }
-    .mc:hover {
-        transform: translateY(-4px);
-        border-color: rgba(0,229,255,0.3);
-        box-shadow: 0 8px 30px rgba(0,229,255,0.1);
+    .app-header::before {
+        content: "";
+        position: absolute; top: 0; left: 0; right: 0; height: 1px;
+        background: linear-gradient(90deg, transparent, rgba(99,102,241,0.7), rgba(139,92,246,0.5), transparent);
     }
-    .mc::after {
-        content: '';
-        position: absolute; bottom: 0; left: 0; right: 0;
-        height: 3px; border-radius: 0 0 16px 16px;
+    .app-header-row { display: flex; align-items: center; gap: 0.9rem; }
+    .brand-mark {
+        width: 40px; height: 40px; border-radius: 11px;
+        background: linear-gradient(135deg, #6366f1, #8b5cf6);
+        display: flex; align-items: center; justify-content: center;
+        box-shadow: 0 4px 16px rgba(99,102,241,0.35), inset 0 1px 0 rgba(255,255,255,0.2);
+        flex-shrink: 0;
     }
-    .mc .mc-icon {
-        font-size: 1.8rem;
-        margin-bottom: 0.5rem;
-        filter: drop-shadow(0 0 8px currentColor);
+    .brand-mark svg { width: 20px; height: 20px; color: #fff; }
+    .app-header h1 {
+        color: var(--text);
+        font-size: 1.4rem; font-weight: 600; margin: 0;
+        letter-spacing: -0.02em;
     }
+    .app-header .header-sub {
+        color: var(--text-3);
+        font-size: 0.85rem;
+        margin: 0.1rem 0 0;
+        font-weight: 400;
+    }
+    .header-badge {
+        margin-left: auto;
+        padding: 0.3rem 0.75rem;
+        border-radius: 999px;
+        font-size: 0.72rem;
+        font-weight: 500;
+        letter-spacing: 0.2px;
+        display: inline-flex; align-items: center; gap: 0.45rem;
+    }
+    .header-badge::before {
+        content: ""; width: 6px; height: 6px; border-radius: 50%;
+    }
+    .badge-live { background: rgba(16,185,129,0.12); color: #34d399; border: 1px solid rgba(16,185,129,0.25); }
+    .badge-live::before { background: #10b981; box-shadow: 0 0 8px #10b981; }
+    .badge-sample { background: rgba(99,102,241,0.12); color: #a5b4fc; border: 1px solid rgba(99,102,241,0.25); }
+    .badge-sample::before { background: #6366f1; }
+
+    /* Metric cards */
+    .mc {
+        background: linear-gradient(180deg, rgba(255,255,255,0.025), rgba(255,255,255,0.005));
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 1.1rem 1.25rem;
+        position: relative;
+        transition: border-color 0.2s ease, transform 0.2s ease;
+        overflow: hidden;
+    }
+    .mc:hover { border-color: var(--border-hi); transform: translateY(-1px); }
+    .mc::before {
+        content: ""; position: absolute; left: 0; top: 0; bottom: 0;
+        width: 3px;
+    }
+    .mc-cyan::before { background: linear-gradient(180deg, #6366f1, #8b5cf6); }
+    .mc-green::before { background: linear-gradient(180deg, #10b981, #059669); }
+    .mc-red::before { background: linear-gradient(180deg, #ef4444, #b91c1c); }
+    .mc-amber::before { background: linear-gradient(180deg, #f59e0b, #d97706); }
+
     .mc .mc-label {
-        color: #64748b; font-size: 0.7rem; font-weight: 600;
-        text-transform: uppercase; letter-spacing: 1.5px;
+        color: var(--text-3);
+        font-size: 0.72rem;
+        font-weight: 500;
+        letter-spacing: 0.4px;
+        text-transform: uppercase;
+        margin-bottom: 0.5rem;
     }
     .mc .mc-val {
-        font-size: 2.2rem; font-weight: 900; margin: 0.2rem 0 0;
-        letter-spacing: -1px;
+        font-size: 1.85rem;
+        font-weight: 600;
+        margin: 0;
+        letter-spacing: -0.03em;
+        color: var(--text);
     }
-    .mc .mc-sub { color: #475569; font-size: 0.75rem; margin-top: 0.2rem; }
+    .mc .mc-sub {
+        color: var(--text-3);
+        font-size: 0.78rem;
+        margin-top: 0.35rem;
+        font-weight: 400;
+    }
+    .mc-green .mc-val { background: linear-gradient(180deg, #34d399, #10b981); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    .mc-red .mc-val   { background: linear-gradient(180deg, #f87171, #ef4444); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    .mc-amber .mc-val { background: linear-gradient(180deg, #fbbf24, #f59e0b); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    .mc-cyan .mc-val  { background: linear-gradient(180deg, #a5b4fc, #6366f1); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
 
-    .mc-cyan .mc-icon { color: #00e5ff; }
-    .mc-cyan .mc-val { color: #00e5ff; text-shadow: 0 0 20px rgba(0,229,255,0.3); }
-    .mc-cyan::after { background: linear-gradient(90deg, #00e5ff, transparent); }
-
-    .mc-green .mc-icon { color: #34d399; }
-    .mc-green .mc-val { color: #34d399; text-shadow: 0 0 20px rgba(52,211,153,0.3); }
-    .mc-green::after { background: linear-gradient(90deg, #34d399, transparent); }
-
-    .mc-red .mc-icon { color: #f87171; }
-    .mc-red .mc-val { color: #f87171; text-shadow: 0 0 20px rgba(248,113,113,0.3); }
-    .mc-red::after { background: linear-gradient(90deg, #f87171, transparent); }
-
-    .mc-amber .mc-icon { color: #fbbf24; }
-    .mc-amber .mc-val { color: #fbbf24; text-shadow: 0 0 20px rgba(251,191,36,0.3); }
-    .mc-amber::after { background: linear-gradient(90deg, #fbbf24, transparent); }
-
-    /* ── Threat bar ── */
+    /* Threat bar */
     .threat-bar {
-        background: rgba(15,23,42,0.6);
-        backdrop-filter: blur(12px);
-        border: 1px solid rgba(255,255,255,0.06);
-        border-radius: 14px;
-        padding: 0.8rem 1.5rem;
-        margin-bottom: 1.2rem;
-        display: flex; align-items: center; gap: 1rem;
+        background: linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01));
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 0.95rem 1.25rem;
+        margin-bottom: 1.25rem;
+        display: flex;
+        align-items: center;
+        gap: 1rem;
     }
-    .tb-icon { font-size: 1.6rem; }
-    .tb-label { color: #475569; font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 1.5px; }
-    .tb-status { font-size: 1.1rem; font-weight: 700; display: flex; align-items: center; gap: 0.5rem; }
-    .pulse {
-        width: 10px; height: 10px; border-radius: 50%;
-        display: inline-block;
-        animation: pulse 2s ease-in-out infinite;
+    .tb-label {
+        color: var(--text-3);
+        font-size: 0.7rem;
+        font-weight: 500;
+        letter-spacing: 0.4px;
+        text-transform: uppercase;
+        margin-bottom: 0.2rem;
     }
-    @keyframes pulse { 0%,100%{opacity:1;box-shadow:0 0 0 0 currentColor} 50%{opacity:0.6;box-shadow:0 0 0 8px transparent} }
-    .pulse-g { background:#34d399; color:#34d399; }
-    .pulse-y { background:#fbbf24; color:#fbbf24; animation-duration:1.5s; }
-    .pulse-o { background:#fb923c; color:#fb923c; animation-duration:1s; }
-    .pulse-r { background:#f87171; color:#f87171; animation-duration:0.6s; }
+    .tb-status {
+        font-size: 1rem;
+        font-weight: 600;
+        color: var(--text);
+    }
     .st-low { color: #34d399; }
     .st-med { color: #fbbf24; }
     .st-high { color: #fb923c; }
     .st-crit { color: #f87171; }
 
-    /* Anomaly rate bar */
     .rate-bar-bg {
-        background: rgba(255,255,255,0.05); border-radius: 6px;
-        height: 6px; flex: 1; margin-left: 1rem; overflow: hidden;
+        background: rgba(255,255,255,0.06);
+        border-radius: 999px;
+        height: 6px;
+        flex: 1;
+        margin-left: 1rem;
+        overflow: hidden;
     }
-    .rate-bar-fill { height: 100%; border-radius: 6px; transition: width 1s ease; }
+    .rate-bar-fill {
+        height: 100%;
+        border-radius: 999px;
+        transition: width 0.5s ease;
+    }
 
-    /* ── Glass card (reusable) ── */
+    /* Card (reusable) */
     .glass {
-        background: rgba(15,23,42,0.5);
-        backdrop-filter: blur(12px);
-        border: 1px solid rgba(255,255,255,0.06);
-        border-radius: 14px;
+        background: linear-gradient(180deg, rgba(255,255,255,0.025), rgba(255,255,255,0.005));
+        border: 1px solid var(--border);
+        border-radius: 12px;
         padding: 1rem 1.2rem;
         margin-bottom: 0.6rem;
-        transition: border-color 0.3s;
     }
-    .glass:hover { border-color: rgba(0,229,255,0.2); }
 
-    /* ── Alert banners ── */
+    /* Alert banners */
     .alert-banner {
         border-radius: 12px;
-        padding: 1rem 1.4rem;
+        padding: 1rem 1.25rem;
         margin-bottom: 1rem;
-        display: flex; align-items: center; gap: 1rem;
+        display: flex;
+        align-items: flex-start;
+        gap: 0.85rem;
+        border: 1px solid;
     }
     .ab-danger {
-        background: linear-gradient(135deg, rgba(248,113,113,0.1), rgba(239,68,68,0.05));
-        border: 1px solid rgba(248,113,113,0.25);
+        background: linear-gradient(180deg, rgba(239,68,68,0.08), rgba(239,68,68,0.02));
+        border-color: rgba(239,68,68,0.25);
     }
     .ab-safe {
-        background: linear-gradient(135deg, rgba(52,211,153,0.1), rgba(16,185,129,0.05));
-        border: 1px solid rgba(52,211,153,0.25);
+        background: linear-gradient(180deg, rgba(16,185,129,0.08), rgba(16,185,129,0.02));
+        border-color: rgba(16,185,129,0.25);
     }
-    .ab-icon { font-size: 1.8rem; filter: drop-shadow(0 0 10px currentColor); }
-    .ab-danger .ab-icon { color: #f87171; }
-    .ab-safe .ab-icon { color: #34d399; }
-    .ab-title { font-weight: 700; color: #e2e8f0; font-size: 1rem; }
-    .ab-desc { color: #94a3b8; font-size: 0.85rem; margin-top: 2px; }
+    .ab-title {
+        font-weight: 600;
+        color: var(--text);
+        font-size: 0.95rem;
+    }
+    .ab-desc {
+        color: var(--text-2);
+        font-size: 0.85rem;
+        margin-top: 3px;
+    }
+    .ab-danger .ab-title { color: #fca5a5; }
+    .ab-safe .ab-title { color: #6ee7b7; }
 
-    /* ── Section header ── */
-    .sec-h {
-        display: flex; align-items: center; gap: 0.6rem;
-        margin: 0.8rem 0 1rem 0;
+    /* Section header */
+    .sec-h { margin: 1.25rem 0 0.85rem 0; }
+    .sec-h h3 {
+        margin: 0;
+        font-size: 0.95rem;
+        font-weight: 600;
+        color: var(--text);
+        letter-spacing: -0.01em;
     }
-    .sec-dot {
-        width: 8px; height: 8px; border-radius: 50%;
-        box-shadow: 0 0 8px currentColor;
-    }
-    .sec-h h3 { margin: 0; font-size: 1rem; font-weight: 700; color: #e2e8f0; }
 
-    /* ── Network info ── */
+    /* Network info */
     .ni-card {
-        background: rgba(15,23,42,0.5);
-        backdrop-filter: blur(12px);
-        border: 1px solid rgba(255,255,255,0.06);
-        border-radius: 12px;
-        padding: 0.7rem 1rem;
+        background: linear-gradient(180deg, rgba(255,255,255,0.025), rgba(255,255,255,0.005));
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 0.8rem 1rem;
         margin-bottom: 0.5rem;
-        display: flex; align-items: center; gap: 0.8rem;
-        transition: all 0.3s;
+        transition: border-color 0.15s ease;
     }
-    .ni-card:hover { border-color: rgba(0,229,255,0.3); transform: translateX(4px); }
-    .ni-icon {
-        width: 40px; height: 40px; border-radius: 10px;
-        display: flex; align-items: center; justify-content: center;
-        font-size: 1.2rem; flex-shrink: 0;
+    .ni-card:hover { border-color: var(--border-hi); }
+    .ni-lbl {
+        color: var(--text-3);
+        font-size: 0.7rem;
+        font-weight: 500;
+        letter-spacing: 0.3px;
+        text-transform: uppercase;
+        margin-bottom: 0.2rem;
     }
-    .ni-icon-b { background: rgba(0,229,255,0.1); }
-    .ni-icon-g { background: rgba(52,211,153,0.1); }
-    .ni-lbl { color: #64748b; font-size: 0.7rem; font-weight: 500; text-transform: uppercase; letter-spacing: 0.8px; }
-    .ni-val { color: #e2e8f0; font-size: 0.95rem; font-weight: 600; }
+    .ni-val {
+        color: var(--text);
+        font-size: 0.95rem;
+        font-weight: 500;
+        font-family: 'JetBrains Mono', ui-monospace, monospace !important;
+    }
 
-    /* ── Sidebar ── */
+    /* Sidebar */
     [data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #0a0e1a, #111827) !important;
-        border-right: 1px solid rgba(255,255,255,0.06);
+        background: linear-gradient(180deg, #0b0b0e 0%, #09090b 100%) !important;
+        border-right: 1px solid var(--border);
     }
-    [data-testid="stSidebar"] h2 { color: #00e5ff; font-weight: 700; }
+    [data-testid="stSidebar"] h2,
+    [data-testid="stSidebar"] label,
+    [data-testid="stSidebar"] p,
+    [data-testid="stSidebar"] span {
+        color: var(--text) !important;
+    }
+    [data-testid="stSidebar"] hr { border-color: var(--border) !important; }
 
-    /* ── Tabs ── */
-    .stTabs [data-baseweb="tab-list"] { gap: 4px; border-bottom: 1px solid rgba(255,255,255,0.06); padding-bottom: 4px; }
+    /* Tabs */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 2px;
+        border-bottom: 1px solid var(--border);
+        background: transparent;
+    }
     .stTabs [data-baseweb="tab"] {
         background: transparent;
         border-radius: 8px 8px 0 0;
-        padding: 8px 14px;
-        color: #64748b;
+        padding: 10px 16px;
+        color: var(--text-3);
         border: none;
         font-weight: 500;
+        font-size: 0.88rem;
+        transition: color 0.15s;
     }
+    .stTabs [data-baseweb="tab"]:hover { color: var(--text-2); }
     .stTabs [aria-selected="true"] {
-        background: rgba(0,229,255,0.08);
-        color: #00e5ff;
-        border-bottom: 2px solid #00e5ff;
+        background: transparent;
+        color: var(--text);
+        border-bottom: 2px solid var(--accent);
         font-weight: 600;
     }
 
-    /* ── Footer ── */
-    .cyber-footer {
-        text-align: center; color: #334155;
-        padding: 1.5rem; font-size: 0.8rem;
-        border-top: 1px solid rgba(255,255,255,0.04);
-        margin-top: 2rem;
+    /* Buttons */
+    .stButton > button,
+    [data-testid="stFormSubmitButton"] > button {
+        background: linear-gradient(180deg, #6366f1, #4f46e5);
+        color: #fff;
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 10px;
+        font-weight: 500;
+        padding: 0.5rem 1.1rem;
+        box-shadow: 0 1px 0 rgba(255,255,255,0.1) inset, 0 4px 14px rgba(99,102,241,0.25);
+        transition: all 0.15s ease;
+    }
+    .stButton > button:hover,
+    [data-testid="stFormSubmitButton"] > button:hover {
+        background: linear-gradient(180deg, #7c7df7, #5b55ea);
+        border-color: rgba(255,255,255,0.15);
+        transform: translateY(-1px);
+    }
+    /* Secondary/outline button (used for Sign Out) */
+    .btn-secondary .stButton > button {
+        background: rgba(255,255,255,0.04);
+        border: 1px solid rgba(255,255,255,0.08);
+        color: #e4e4e7;
+        box-shadow: none;
+    }
+    .btn-secondary .stButton > button:hover {
+        background: rgba(239,68,68,0.08);
+        border-color: rgba(239,68,68,0.3);
+        color: #fca5a5;
+    }
+
+    /* Executive overview panel */
+    .exec-grid {
+        display: grid;
+        grid-template-columns: 1.3fr 1fr 1fr;
+        gap: 0.9rem;
+        margin-bottom: 1.25rem;
+    }
+    .exec-card {
+        position: relative;
+        background: linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.008));
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 1.1rem 1.25rem;
+        overflow: hidden;
+    }
+    .exec-card .ec-label {
+        color: var(--text-3);
+        font-size: 0.7rem;
+        font-weight: 500;
+        letter-spacing: 0.4px;
+        text-transform: uppercase;
+    }
+    .ec-score-row { display: flex; align-items: baseline; gap: 0.45rem; margin-top: 0.4rem; }
+    .ec-score {
+        font-size: 2.4rem; font-weight: 700; letter-spacing: -0.03em; line-height: 1;
+        background: linear-gradient(180deg, #a5b4fc, #6366f1);
+        -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    }
+    .ec-score-unit { color: var(--text-3); font-size: 0.85rem; font-weight: 500; }
+    .ec-score-status {
+        display: inline-flex; align-items: center; gap: 0.4rem;
+        padding: 0.2rem 0.6rem; border-radius: 999px;
+        font-size: 0.72rem; font-weight: 500;
+        margin-top: 0.6rem;
+    }
+    .ec-status-good { background: rgba(16,185,129,0.12); color: #34d399; border: 1px solid rgba(16,185,129,0.25); }
+    .ec-status-warn { background: rgba(245,158,11,0.12); color: #fbbf24; border: 1px solid rgba(245,158,11,0.25); }
+    .ec-status-bad  { background: rgba(239,68,68,0.12); color: #f87171; border: 1px solid rgba(239,68,68,0.25); }
+    .ec-score-bar {
+        margin-top: 0.85rem; height: 6px; border-radius: 999px;
+        background: rgba(255,255,255,0.06); overflow: hidden;
+    }
+    .ec-score-bar-fill {
+        height: 100%; border-radius: 999px;
+        background: linear-gradient(90deg, #6366f1, #8b5cf6);
+    }
+    .ec-metric-val { font-size: 1.5rem; font-weight: 600; color: var(--text); margin-top: 0.4rem; letter-spacing: -0.02em; }
+    .ec-metric-sub { color: var(--text-3); font-size: 0.78rem; margin-top: 0.25rem; }
+
+    /* User chip in sidebar */
+    .user-chip {
+        display: flex; align-items: center; gap: 0.65rem;
+        padding: 0.7rem 0.85rem;
+        background: linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01));
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        margin-bottom: 1rem;
+    }
+    .user-avatar {
+        width: 34px; height: 34px; border-radius: 50%;
+        background: linear-gradient(135deg, #6366f1, #8b5cf6);
+        display: flex; align-items: center; justify-content: center;
+        color: #fff; font-weight: 600; font-size: 0.85rem;
+        flex-shrink: 0;
+    }
+    .user-meta { line-height: 1.25; min-width: 0; }
+    .user-name { color: var(--text); font-size: 0.88rem; font-weight: 600; }
+    .user-role { color: var(--text-3); font-size: 0.72rem; }
+    .stDownloadButton > button {
+        background: linear-gradient(180deg, #10b981, #059669);
+        color: #fff;
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 10px;
+        font-weight: 500;
+        box-shadow: 0 1px 0 rgba(255,255,255,0.1) inset, 0 4px 14px rgba(16,185,129,0.25);
+    }
+
+    /* Inputs */
+    .stTextInput input,
+    .stSelectbox div[data-baseweb="select"] > div,
+    .stNumberInput input {
+        background: rgba(255,255,255,0.04) !important;
+        border: 1px solid var(--border) !important;
+        border-radius: 10px !important;
+        color: var(--text) !important;
+    }
+    .stTextInput input:focus,
+    .stNumberInput input:focus {
+        border-color: var(--accent) !important;
+        box-shadow: 0 0 0 3px rgba(99,102,241,0.2) !important;
+    }
+
+    /* Dataframes */
+    .stDataFrame {
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        overflow: hidden;
+    }
+    /* Streamlit's dataframe toolbar can show hover tooltips ("Rearrange columns",
+       "Search", etc.) that visually bleed into adjacent widgets. Keep them inside. */
+    [data-testid="stDataFrame"] { position: relative; isolation: isolate; }
+    [data-testid="stDataFrame"] [data-testid="StyledFullScreenButton"],
+    [data-testid="stDataFrame"] [title] { z-index: 1; }
+    .stDataFrame [data-testid="stTable"] { background: transparent !important; }
+
+    /* Metrics widget override */
+    [data-testid="stMetricValue"] { color: var(--text) !important; font-weight: 600 !important; }
+    [data-testid="stMetricLabel"] { color: var(--text-3) !important; }
+
+    /* Info/warning/success boxes */
+    .stAlert { border-radius: 12px !important; background: rgba(255,255,255,0.03) !important; border: 1px solid var(--border) !important; }
+
+    /* Checkbox */
+    [data-testid="stCheckbox"] label { color: var(--text-2) !important; }
+
+    /* Footer */
+    .app-footer {
+        text-align: center;
+        color: var(--text-3);
+        padding: 1.75rem 1rem 1rem;
+        font-size: 0.8rem;
+        border-top: 1px solid var(--border);
+        margin-top: 2.5rem;
+        font-weight: 400;
+    }
+    .app-footer .dot {
+        display: inline-block; width: 4px; height: 4px; border-radius: 50%;
+        background: var(--accent); margin: 0 0.5rem; vertical-align: middle;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -804,17 +1174,106 @@ if df is None:
 df = run_detection(df)
 df["attack_type"] = df.apply(classify_attack, axis=1)
 
+# Stateful behavioral detection — catches patterns that no single packet can
+# reveal: port scans (many distinct ports), brute force (many repeats to same
+# target), and DoS floods (high packet volume per source).
+_behavior_hits = behavior.enrich(df)
+if "src_ip" in df.columns:
+    for _pattern, _ips in _behavior_hits.items():
+        if not _ips:
+            continue
+        _hit_mask = df["src_ip"].astype(str).isin(_ips)
+        df.loc[_hit_mask, "attack_type"] = _pattern
+        df.loc[_hit_mask, "prediction"] = -1
+        df.loc[_hit_mask, "status"] = "ANOMALY"
+
+# Apply allowlist: any src_ip on the allowlist is reclassified as Normal.
+_allowlisted_ips = {row["ip"] for row in storage.list_allowlist()}
+if _allowlisted_ips and "src_ip" in df.columns:
+    _mask = df["src_ip"].isin(_allowlisted_ips)
+    df.loc[_mask, "prediction"] = 1
+    df.loc[_mask, "status"] = "Normal"
+    df.loc[_mask, "attack_type"] = "Normal"
+
+# Threat-intel enrichment: upgrade any source IP that matches a known IOC feed.
+_ti_iocs = _load_threat_intel()
+if "src_ip" in df.columns:
+    _ti_match_map: dict[str, list[str]] = {}
+    for _unique_ip in df["src_ip"].dropna().unique():
+        _hits = threat_intel.check(str(_unique_ip), _ti_iocs)
+        if _hits:
+            _ti_match_map[str(_unique_ip)] = _hits
+    if _ti_match_map:
+        _ti_mask = df["src_ip"].astype(str).isin(_ti_match_map.keys())
+        df.loc[_ti_mask, "attack_type"] = "Known Malicious"
+        df.loc[_ti_mask, "prediction"] = -1
+        df.loc[_ti_mask, "status"] = "ANOMALY"
+        df["threat_intel"] = df["src_ip"].astype(str).map(
+            lambda ip: ", ".join(_ti_match_map.get(ip, []))
+        )
+    else:
+        df["threat_intel"] = ""
+else:
+    df["threat_intel"] = ""
+
+# Persist new anomalies (deduped by src_ip+attack_type within dedup window).
+_cfg = app_config.load_config()
+_dedup_window = int(_cfg.get("dedup", {}).get("window_seconds", 300))
+_anoms = df[df["prediction"] == -1]
+_new_alerts = []
+for _, _row in _anoms.iterrows():
+    _src = str(_row.get("src_ip", ""))
+    _atk = str(_row.get("attack_type", ""))
+    _key = storage.dedup_key(_src, _atk, _dedup_window)
+    if storage.alert_exists(_key):
+        continue
+    _new_alerts.append({
+        "ts": str(_row.get("timestamp") or datetime.now().isoformat()),
+        "src_ip": _src,
+        "dst_ip": str(_row.get("dst_ip", "")),
+        "protocol": str(_row.get("protocol", "")),
+        "src_port": int(_row.get("src_port") or 0),
+        "dst_port": int(_row.get("dst_port") or 0),
+        "packet_size": int(_row.get("packet_size") or 0),
+        "flags": str(_row.get("flags", "")),
+        "attack_type": _atk,
+        "dedup_key": _key,
+    })
+
+if _new_alerts:
+    storage.record_alerts(_new_alerts)
+    _severity = alerting.severity_from_pct(
+        len(_anoms) / max(len(df), 1) * 100,
+    )
+    _body = "\n".join(
+        f"- {a['src_ip']} → {a['dst_ip']} [{a['attack_type']}]"
+        for a in _new_alerts[:10]
+    )
+    alerting.dispatch(
+        _cfg,
+        title=f"NetWatchAI: {len(_new_alerts)} new threat(s) ({_severity})",
+        body=_body,
+        severity=_severity,
+    )
+
 # ──────────────────────────────────────────────
 # Header
 # ──────────────────────────────────────────────
 
 badge_cls = "badge-live" if data_source == "Live Capture" else "badge-sample"
-badge_txt = "LIVE" if data_source == "Live Capture" else "SAMPLE DATA"
+badge_txt = "Live" if data_source == "Live Capture" else "Sample Data"
 st.markdown(f"""
-<div class="cyber-header">
-    <h1>🛡️ NetWatchAI</h1>
-    <p class="header-sub">AI-Powered Network Monitoring & Intrusion Detection System</p>
-    <span class="header-badge {badge_cls}">{badge_txt}</span>
+<div class="app-header">
+    <div class="app-header-row">
+        <div class="brand-mark">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        </div>
+        <div style="flex:1;">
+            <h1>NetWatchAI</h1>
+            <p class="header-sub">Network Monitoring and Intrusion Detection</p>
+        </div>
+        <span class="header-badge {badge_cls}">{badge_txt}</span>
+    </div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -822,7 +1281,31 @@ st.markdown(f"""
 # Sidebar
 # ──────────────────────────────────────────────
 
-st.sidebar.markdown("## 🔧 Filters")
+# User chip + sign-out at the top of the sidebar — only when auth is enabled.
+if _auth_enabled:
+    login_time = st.session_state.get("login_time")
+    session_txt = login_time.strftime("Signed in at %H:%M") if login_time else "Signed in"
+    st.sidebar.markdown(f"""
+    <div class="user-chip">
+        <div class="user-avatar">SA</div>
+        <div class="user-meta">
+            <div class="user-name">Security Admin</div>
+            <div class="user-role">{session_txt}</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    with st.sidebar.container():
+        st.markdown('<div class="btn-secondary">', unsafe_allow_html=True)
+        if st.button("Sign Out", use_container_width=True, key="signout_btn"):
+            storage.log_audit("user", "logout")
+            st.session_state.authenticated = False
+            st.session_state.pop("login_time", None)
+            st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    st.sidebar.markdown("---")
+st.sidebar.markdown("## Filters")
 protocols = ["All"] + sorted(df["protocol"].dropna().unique().tolist())
 selected_protocol = st.sidebar.selectbox("Protocol", protocols)
 status_options = ["All"] + sorted(df["status"].dropna().unique().tolist())
@@ -841,8 +1324,8 @@ if auto_refresh:
     st.rerun()
 
 st.sidebar.markdown("---")
-st.sidebar.markdown(f"📊 **Total:** {len(df)} packets")
-st.sidebar.markdown(f"🔍 **Filtered:** {len(filtered_df)} packets")
+st.sidebar.markdown(f"**Total:** {len(df)} packets")
+st.sidebar.markdown(f"**Filtered:** {len(filtered_df)} packets")
 
 # ──────────────────────────────────────────────
 # Metrics
@@ -854,52 +1337,58 @@ n_normal = int((df["prediction"] == 1).sum())
 anomaly_pct = (n_anomalies / total_packets * 100) if total_packets > 0 else 0
 normal_pct = (n_normal / total_packets * 100) if total_packets > 0 else 0
 
-# Threat level
-if anomaly_pct == 0:
-    t_txt, t_cls, t_icon, p_cls, bar_color = "ALL CLEAR", "st-low", "✅", "pulse-g", "#34d399"
-elif anomaly_pct < 5:
-    t_txt, t_cls, t_icon, p_cls, bar_color = "LOW RISK", "st-low", "✅", "pulse-g", "#34d399"
-elif anomaly_pct < 15:
-    t_txt, t_cls, t_icon, p_cls, bar_color = "MEDIUM — Suspicious Activity", "st-med", "⚠️", "pulse-y", "#fbbf24"
-elif anomaly_pct < 30:
-    t_txt, t_cls, t_icon, p_cls, bar_color = "HIGH — Active Threats", "st-high", "🔶", "pulse-o", "#fb923c"
+# Business-facing Security Score — inverse of anomaly rate, dampened
+security_score = max(0, min(100, round(100 - (anomaly_pct * 2.5))))
+if security_score >= 85:
+    sec_status_txt, sec_status_cls = "Healthy", "ec-status-good"
+elif security_score >= 60:
+    sec_status_txt, sec_status_cls = "Needs Attention", "ec-status-warn"
 else:
-    t_txt, t_cls, t_icon, p_cls, bar_color = "CRITICAL — Under Attack", "st-crit", "🚨", "pulse-r", "#f87171"
+    sec_status_txt, sec_status_cls = "At Risk", "ec-status-bad"
+
+unique_sources = int(df["src_ip"].nunique()) if "src_ip" in df.columns else 0
+anomaly_df_preview = df[df["prediction"] == -1]
+unique_attackers = int(anomaly_df_preview["src_ip"].nunique()) if len(anomaly_df_preview) > 0 else 0
 
 st.markdown(f"""
-<div class="threat-bar">
-    <span class="tb-icon">{t_icon}</span>
-    <div style="flex:1;">
-        <div class="tb-label">Threat Level</div>
-        <div class="tb-status {t_cls}">
-            <span class="pulse {p_cls}"></span> {t_txt}
+<div class="exec-grid">
+    <div class="exec-card">
+        <div class="ec-label">Security Score</div>
+        <div class="ec-score-row">
+            <span class="ec-score">{security_score}</span>
+            <span class="ec-score-unit">/ 100</span>
         </div>
+        <div class="ec-score-bar"><div class="ec-score-bar-fill" style="width:{security_score}%;"></div></div>
+        <span class="ec-score-status {sec_status_cls}">&bull; {sec_status_txt}</span>
     </div>
-    <div class="rate-bar-bg">
-        <div class="rate-bar-fill" style="width:{min(anomaly_pct*2, 100):.0f}%; background:{bar_color};"></div>
+    <div class="exec-card">
+        <div class="ec-label">Threats Detected</div>
+        <div class="ec-metric-val">{n_anomalies:,}</div>
+        <div class="ec-metric-sub">{anomaly_pct:.1f}% of {total_packets:,} packets analyzed</div>
     </div>
-    <span style="color:{bar_color}; font-weight:700; font-size:0.9rem; min-width:45px; text-align:right;">{anomaly_pct:.1f}%</span>
+    <div class="exec-card">
+        <div class="ec-label">Hostile Sources</div>
+        <div class="ec-metric-val">{unique_attackers}</div>
+        <div class="ec-metric-sub">of {unique_sources} total sources observed</div>
+    </div>
 </div>
 """, unsafe_allow_html=True)
 
 col1, col2, col3, col4 = st.columns(4)
 with col1:
     st.markdown(f"""<div class="mc mc-cyan">
-        <div class="mc-icon">📊</div>
         <div class="mc-label">Total Packets</div>
         <div class="mc-val">{total_packets:,}</div>
         <div class="mc-sub">All captured traffic</div>
     </div>""", unsafe_allow_html=True)
 with col2:
     st.markdown(f"""<div class="mc mc-green">
-        <div class="mc-icon">✅</div>
         <div class="mc-label">Normal</div>
         <div class="mc-val">{n_normal:,}</div>
         <div class="mc-sub">{normal_pct:.1f}% safe traffic</div>
     </div>""", unsafe_allow_html=True)
 with col3:
     st.markdown(f"""<div class="mc mc-red">
-        <div class="mc-icon">🚨</div>
         <div class="mc-label">Anomalies</div>
         <div class="mc-val">{n_anomalies:,}</div>
         <div class="mc-sub">{anomaly_pct:.1f}% suspicious</div>
@@ -907,31 +1396,31 @@ with col3:
 with col4:
     unique_attacks = df[df["prediction"]==-1]["attack_type"].nunique()
     st.markdown(f"""<div class="mc mc-amber">
-        <div class="mc-icon">🎯</div>
         <div class="mc-label">Attack Types</div>
         <div class="mc-val">{unique_attacks}</div>
         <div class="mc-sub">Unique threat patterns</div>
     </div>""", unsafe_allow_html=True)
 
-st.markdown("<div style='height:0.8rem'></div>", unsafe_allow_html=True)
+st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
 
 anomaly_df = df[df["prediction"] == -1]
 
-# Chart config
-COLORS = ["#00e5ff", "#7c4dff", "#e040fb", "#ff5252", "#ffd740", "#69f0ae", "#40c4ff", "#ea80fc", "#ff6e40", "#b2ff59"]
-SAFE = "#34d399"
-DANGER = "#f87171"
-NEUTRAL = "#475569"
-FONT = "#94a3b8"
+# Chart config — refined palette, dark theme
+COLORS = ["#6366f1", "#8b5cf6", "#06b6d4", "#10b981", "#f59e0b", "#ef4444", "#ec4899", "#14b8a6", "#a78bfa", "#f97316"]
+SAFE = "#10b981"
+DANGER = "#ef4444"
+NEUTRAL = "#71717a"
+FONT = "#a1a1aa"
 BG = "rgba(0,0,0,0)"
+GRID = "rgba(255,255,255,0.06)"
 
 def chart_layout(fig, **kwargs):
     fig.update_layout(
         paper_bgcolor=BG, plot_bgcolor=BG, font_color=FONT,
         margin=dict(t=10, b=10, l=10, r=10),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(size=11)),
-        xaxis=dict(gridcolor="rgba(255,255,255,0.04)", zerolinecolor="rgba(255,255,255,0.04)"),
-        yaxis=dict(gridcolor="rgba(255,255,255,0.04)", zerolinecolor="rgba(255,255,255,0.04)"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(size=11, color=FONT)),
+        xaxis=dict(gridcolor=GRID, zerolinecolor=GRID, linecolor=GRID, tickfont=dict(color=FONT)),
+        yaxis=dict(gridcolor=GRID, zerolinecolor=GRID, linecolor=GRID, tickfont=dict(color=FONT)),
         **kwargs,
     )
     return fig
@@ -940,10 +1429,10 @@ def chart_layout(fig, **kwargs):
 # Tabs
 # ──────────────────────────────────────────────
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
-    "🚨 Alerts", "🎯 Attack Types", "🏴‍☠️ Top Attackers",
-    "📈 Timeline", "📊 Statistics", "📡 Network Info",
-    "🤖 AI Analyst", "🌍 Attack Map", "📄 PDF Report",
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab_settings = st.tabs([
+    "Alerts", "Attack Types", "Top Attackers",
+    "Timeline", "Statistics", "Network Info",
+    "Attack Map", "PDF Report", "Settings",
 ])
 
 # ── Tab 1: Alerts ──────────────────────────────
@@ -951,29 +1440,80 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
 with tab1:
     if len(anomaly_df) == 0:
         st.markdown("""<div class="alert-banner ab-safe">
-            <div class="ab-icon">✅</div>
-            <div><div class="ab-title">All Clear — No Threats Detected</div>
+            <div><div class="ab-title">All Clear: No Threats Detected</div>
             <div class="ab-desc">All network traffic appears normal. No anomalies found in current data.</div></div>
         </div>""", unsafe_allow_html=True)
     else:
         st.markdown(f"""<div class="alert-banner ab-danger">
-            <div class="ab-icon">🚨</div>
-            <div><div class="ab-title">{n_anomalies} Threat(s) Detected — Immediate Review Required</div>
+            <div><div class="ab-title">{n_anomalies} Threat(s) Detected. Immediate Review Required.</div>
             <div class="ab-desc">{unique_attacks} unique attack pattern(s) found across {anomaly_df['src_ip'].nunique()} source IP(s).</div></div>
         </div>""", unsafe_allow_html=True)
         alert_cols = ["timestamp", "src_ip", "dst_ip", "protocol", "src_port", "dst_port", "packet_size", "flags", "attack_type"]
         st.dataframe(anomaly_df[[c for c in alert_cols if c in anomaly_df.columns]], use_container_width=True, hide_index=True)
 
+    # Spacer prevents the dataframe's hover toolbar tooltip ("Rearrange columns",
+    # "Search", "Download") from visually overlapping the expander title below.
+    st.markdown("<div style='height:1.75rem'></div>", unsafe_allow_html=True)
+
+    # Review persisted alerts: mark as false positive or allowlist.
+    with st.expander("Manage alerts (mark false positives, add to allowlist)", expanded=False):
+        st.caption(
+            "This list shows threats NetWatchAI has saved to its database over the last 7 days. "
+            "Click 'False positive' to suppress a wrong alert, or 'Allowlist' to trust the source IP forever."
+        )
+        stored = storage.list_alerts(days=7, include_fp=False)
+        if not stored:
+            st.info(
+                "Nothing to review yet. New threats will appear here after they're detected. "
+                "If you're running on sample data, any anomalies you see above have already been "
+                "saved for the next time you open this panel."
+            )
+        else:
+            st.caption(f"Showing {len(stored)} saved alert(s).")
+            for alert in stored[:25]:
+                c1, c2, c3, c4 = st.columns([4, 2, 1.2, 1.2])
+                with c1:
+                    st.markdown(
+                        f"<div style='font-size:0.85rem;'>"
+                        f"<b>{alert['attack_type']}</b> &middot; "
+                        f"<span style='color:#a1a1aa;font-family:JetBrains Mono,monospace;'>"
+                        f"{alert['src_ip']} → {alert['dst_ip']}</span></div>"
+                        f"<div style='color:#71717a;font-size:0.75rem;'>{alert['ts']}</div>",
+                        unsafe_allow_html=True,
+                    )
+                with c2:
+                    st.markdown(
+                        f"<span style='color:#a1a1aa;font-size:0.8rem;'>"
+                        f"{alert['protocol']} :{alert['dst_port']} &middot; {alert['packet_size']}B"
+                        f"</span>",
+                        unsafe_allow_html=True,
+                    )
+                with c3:
+                    if st.button("False positive", key=f"fp_{alert['id']}"):
+                        storage.mark_false_positive(alert["id"])
+                        storage.log_audit("user", "mark_fp", f"alert_id={alert['id']}")
+                        st.rerun()
+                with c4:
+                    if st.button("Allowlist", key=f"al_{alert['id']}"):
+                        storage.add_allowlist(alert["src_ip"], note=f"from alert {alert['id']}")
+                        storage.log_audit("user", "allowlist_add", alert["src_ip"])
+                        st.rerun()
+
     st.markdown("---")
-    st.markdown(f"""<div class="sec-h"><div class="sec-dot" style="background:#00e5ff; color:#00e5ff;"></div>
-        <h3>Packet Log — {len(filtered_df):,} of {len(df):,}</h3></div>""", unsafe_allow_html=True)
+    st.markdown(f"""<div class="sec-h"><h3>Packet Log ({len(filtered_df):,} of {len(df):,})</h3></div>""", unsafe_allow_html=True)
 
     display_cols = ["timestamp", "src_ip", "dst_ip", "protocol", "src_port", "dst_port", "packet_size", "flags", "attack_type", "status"]
     avail = [c for c in display_cols if c in filtered_df.columns]
     if len(filtered_df) == 0:
         st.info("No packets match filters.")
     else:
-        st.dataframe(filtered_df[avail].reset_index(drop=True), use_container_width=True, hide_index=True, height=400)
+        PAGE_SIZE = 100
+        total_pages = max(1, (len(filtered_df) + PAGE_SIZE - 1) // PAGE_SIZE)
+        page = st.number_input("Page", min_value=1, max_value=total_pages, value=1, step=1, key="packet_log_page")
+        start = (page - 1) * PAGE_SIZE
+        end = min(start + PAGE_SIZE, len(filtered_df))
+        st.caption(f"Showing {start+1}–{end} of {len(filtered_df):,} packets (page {page}/{total_pages})")
+        st.dataframe(filtered_df[avail].iloc[start:end].reset_index(drop=True), use_container_width=True, hide_index=True, height=400)
 
 # ── Tab 2: Attack Types ───────────────────────
 
@@ -981,17 +1521,15 @@ with tab2:
     if len(anomaly_df) > 0:
         c1, c2 = st.columns([1.2, 1])
         with c1:
-            st.markdown("""<div class="sec-h"><div class="sec-dot" style="background:#e040fb; color:#e040fb;"></div>
-                <h3>Attack Distribution</h3></div>""", unsafe_allow_html=True)
+            st.markdown("""<div class="sec-h"><h3>Attack Distribution</h3></div>""", unsafe_allow_html=True)
             ac = anomaly_df["attack_type"].value_counts().reset_index()
             ac.columns = ["Attack Type", "Count"]
             fig = px.pie(ac, values="Count", names="Attack Type", color_discrete_sequence=COLORS, hole=0.5)
-            fig.update_traces(textinfo="percent+label", textfont_size=11, marker=dict(line=dict(color="#0a0e1a", width=2)))
+            fig.update_traces(textinfo="percent+label", textfont_size=11, marker=dict(line=dict(color="#09090b", width=2)))
             chart_layout(fig)
             st.plotly_chart(fig, use_container_width=True)
         with c2:
-            st.markdown("""<div class="sec-h"><div class="sec-dot" style="background:#ffd740; color:#ffd740;"></div>
-                <h3>Attack Details</h3></div>""", unsafe_allow_html=True)
+            st.markdown("""<div class="sec-h"><h3>Attack Details</h3></div>""", unsafe_allow_html=True)
             desc = {"Port Scan":"Probing open ports to find vulnerabilities", "Ping of Death":"Oversized ICMP packets to crash systems",
                     "Data Exfiltration":"Stealing data via suspicious ports", "Suspicious Port":"Traffic to known backdoor ports",
                     "Large Transfer":"Abnormally large data transfer", "DNS Anomaly":"DNS tunneling or spoofing attempt",
@@ -1001,7 +1539,7 @@ with tab2:
             acs["Description"] = acs["Attack Type"].map(desc).fillna("")
             st.dataframe(acs, use_container_width=True, hide_index=True)
     else:
-        st.markdown("""<div class="alert-banner ab-safe"><div class="ab-icon">🎯</div>
+        st.markdown("""<div class="alert-banner ab-safe">
             <div><div class="ab-title">No Attack Patterns Found</div>
             <div class="ab-desc">Your network looks clean.</div></div></div>""", unsafe_allow_html=True)
 
@@ -1011,27 +1549,25 @@ with tab3:
     if len(anomaly_df) > 0:
         c1, c2 = st.columns(2)
         with c1:
-            st.markdown("""<div class="sec-h"><div class="sec-dot" style="background:#ff5252; color:#ff5252;"></div>
-                <h3>Suspicious Sources</h3></div>""", unsafe_allow_html=True)
+            st.markdown("""<div class="sec-h"><h3>Suspicious Sources</h3></div>""", unsafe_allow_html=True)
             top_src = anomaly_df["src_ip"].value_counts().head(10).reset_index()
             top_src.columns = ["Source IP", "Attacks"]
             top_src["Types"] = top_src["Source IP"].apply(lambda ip: ", ".join(anomaly_df[anomaly_df["src_ip"]==ip]["attack_type"].unique()))
             st.dataframe(top_src, use_container_width=True, hide_index=True)
         with c2:
-            st.markdown("""<div class="sec-h"><div class="sec-dot" style="background:#ffd740; color:#ffd740;"></div>
-                <h3>Targeted Destinations</h3></div>""", unsafe_allow_html=True)
+            st.markdown("""<div class="sec-h"><h3>Targeted Destinations</h3></div>""", unsafe_allow_html=True)
             top_dst = anomaly_df["dst_ip"].value_counts().head(10).reset_index()
             top_dst.columns = ["Destination IP", "Attacks"]
             top_dst["Ports"] = top_dst["Destination IP"].apply(lambda ip: ", ".join(str(p) for p in anomaly_df[anomaly_df["dst_ip"]==ip]["dst_port"].unique()[:5]))
             st.dataframe(top_dst, use_container_width=True, hide_index=True)
 
         fig = px.bar(top_src, x="Attacks", y="Source IP", orientation="h", color="Attacks",
-                     color_continuous_scale=[[0,"#1e1b4b"],[0.5,"#7c4dff"],[1,"#e040fb"]])
+                     color_continuous_scale=[[0,"#1e1b4b"],[0.5,"#6366f1"],[1,"#a78bfa"]])
         chart_layout(fig, showlegend=False, coloraxis_showscale=False)
-        fig.update_layout(yaxis=dict(autorange="reversed", gridcolor="rgba(255,255,255,0.04)"))
+        fig.update_layout(yaxis=dict(autorange="reversed", gridcolor=GRID))
         st.plotly_chart(fig, use_container_width=True)
     else:
-        st.markdown("""<div class="alert-banner ab-safe"><div class="ab-icon">🏴‍☠️</div>
+        st.markdown("""<div class="alert-banner ab-safe">
             <div><div class="ab-title">No Attackers Found</div>
             <div class="ab-desc">No suspicious source IPs detected.</div></div></div>""", unsafe_allow_html=True)
 
@@ -1043,8 +1579,7 @@ with tab4:
         tdf["timestamp"] = pd.to_datetime(tdf["timestamp"], errors="coerce")
         tdf = tdf.dropna(subset=["timestamp"])
         if len(tdf) > 0:
-            st.markdown("""<div class="sec-h"><div class="sec-dot" style="background:#00e5ff; color:#00e5ff;"></div>
-                <h3>Traffic Over Time</h3></div>""", unsafe_allow_html=True)
+            st.markdown("""<div class="sec-h"><h3>Traffic Over Time</h3></div>""", unsafe_allow_html=True)
             tdf["tb"] = tdf["timestamp"].dt.floor("1min")
             tg = tdf.groupby(["tb", "status"]).size().reset_index(name="count")
             fig = px.area(tg, x="tb", y="count", color="status",
@@ -1055,8 +1590,7 @@ with tab4:
 
             at = tdf[tdf["status"]=="ANOMALY"]
             if len(at) > 0:
-                st.markdown("""<div class="sec-h"><div class="sec-dot" style="background:#ff5252; color:#ff5252;"></div>
-                    <h3>Attacks Over Time</h3></div>""", unsafe_allow_html=True)
+                st.markdown("""<div class="sec-h"><h3>Attacks Over Time</h3></div>""", unsafe_allow_html=True)
                 abt = at.groupby(["tb","attack_type"]).size().reset_index(name="count")
                 fig = px.bar(abt, x="tb", y="count", color="attack_type", color_discrete_sequence=COLORS,
                              labels={"tb":"Time","count":"Attacks","attack_type":"Type"})
@@ -1072,17 +1606,15 @@ with tab4:
 with tab5:
     c1, c2 = st.columns(2)
     with c1:
-        st.markdown("""<div class="sec-h"><div class="sec-dot" style="background:#40c4ff; color:#40c4ff;"></div>
-            <h3>Protocol Distribution</h3></div>""", unsafe_allow_html=True)
+        st.markdown("""<div class="sec-h"><h3>Protocol Distribution</h3></div>""", unsafe_allow_html=True)
         pc = df["protocol"].value_counts().reset_index()
         pc.columns = ["Protocol", "Count"]
         fig = px.pie(pc, values="Count", names="Protocol", color_discrete_sequence=COLORS, hole=0.5)
-        fig.update_traces(textinfo="percent+label", textfont_size=11, marker=dict(line=dict(color="#0a0e1a", width=2)))
+        fig.update_traces(textinfo="percent+label", textfont_size=11, marker=dict(line=dict(color="#09090b", width=2)))
         chart_layout(fig)
         st.plotly_chart(fig, use_container_width=True)
     with c2:
-        st.markdown("""<div class="sec-h"><div class="sec-dot" style="background:#69f0ae; color:#69f0ae;"></div>
-            <h3>Normal vs Anomaly</h3></div>""", unsafe_allow_html=True)
+        st.markdown("""<div class="sec-h"><h3>Normal vs Anomaly</h3></div>""", unsafe_allow_html=True)
         sc = df["status"].value_counts().reset_index()
         sc.columns = ["Status", "Count"]
         fig = px.bar(sc, x="Status", y="Count", color="Status",
@@ -1091,8 +1623,7 @@ with tab5:
         chart_layout(fig, showlegend=False)
         st.plotly_chart(fig, use_container_width=True)
 
-    st.markdown("""<div class="sec-h"><div class="sec-dot" style="background:#ea80fc; color:#ea80fc;"></div>
-        <h3>Packet Size Distribution</h3></div>""", unsafe_allow_html=True)
+    st.markdown("""<div class="sec-h"><h3>Packet Size Distribution</h3></div>""", unsafe_allow_html=True)
     fig = px.histogram(df, x="packet_size", color="status", nbins=30,
                        color_discrete_map={"Normal":SAFE, "ANOMALY":DANGER, "Unknown":NEUTRAL},
                        labels={"packet_size":"Packet Size (bytes)","status":"Status"})
@@ -1101,28 +1632,21 @@ with tab5:
 
 # ── Tab 6: Network Info ────────────────────────
 
-WIFI_ICO = {"WiFi Network (SSID)":"📶","Signal Strength":"📡","Link Speed":"⚡","Channel":"📻","Hostname":"💻"}
-IP_ICO = {"Local IP":"🏠","Public IP":"🌐","Gateway (Router)":"🔀","Subnet Mask":"🎭","MAC Address":"🔖","DNS Servers":"📇"}
-
 with tab6:
     net_info = get_network_info()
     c1, c2 = st.columns(2)
     with c1:
-        st.markdown("""<div class="sec-h"><div class="sec-dot" style="background:#00e5ff; color:#00e5ff;"></div>
-            <h3>WiFi & Connection</h3></div>""", unsafe_allow_html=True)
+        st.markdown("""<div class="sec-h"><h3>WiFi and Connection</h3></div>""", unsafe_allow_html=True)
         for key in ["WiFi Network (SSID)", "Signal Strength", "Link Speed", "Channel", "Hostname"]:
             val = html_module.escape(str(net_info.get(key, "N/A")))
-            ico = WIFI_ICO.get(key, "📌")
-            st.markdown(f"""<div class="ni-card"><div class="ni-icon ni-icon-b">{ico}</div>
-                <div><div class="ni-lbl">{key}</div><div class="ni-val">{val}</div></div></div>""", unsafe_allow_html=True)
+            st.markdown(f"""<div class="ni-card">
+                <div class="ni-lbl">{key}</div><div class="ni-val">{val}</div></div>""", unsafe_allow_html=True)
     with c2:
-        st.markdown("""<div class="sec-h"><div class="sec-dot" style="background:#34d399; color:#34d399;"></div>
-            <h3>IP & Routing</h3></div>""", unsafe_allow_html=True)
+        st.markdown("""<div class="sec-h"><h3>IP and Routing</h3></div>""", unsafe_allow_html=True)
         for key in ["Local IP", "Public IP", "Gateway (Router)", "Subnet Mask", "MAC Address", "DNS Servers"]:
             val = html_module.escape(str(net_info.get(key, "N/A")))
-            ico = IP_ICO.get(key, "📌")
-            st.markdown(f"""<div class="ni-card"><div class="ni-icon ni-icon-g">{ico}</div>
-                <div><div class="ni-lbl">{key}</div><div class="ni-val">{val}</div></div></div>""", unsafe_allow_html=True)
+            st.markdown(f"""<div class="ni-card">
+                <div class="ni-lbl">{key}</div><div class="ni-val">{val}</div></div>""", unsafe_allow_html=True)
 
     signal_str = net_info.get("Signal Strength", "")
     if "dBm" in signal_str:
@@ -1130,51 +1654,21 @@ with tab6:
         gauge_val = max(0, min(100, (rssi_val + 100) * 100 // 70))
         fig = go.Figure(go.Indicator(
             mode="gauge+number", value=gauge_val,
-            title={"text":"WiFi Signal Quality", "font":{"color":"#94a3b8","size":14}},
-            number={"suffix":"%", "font":{"color":"#00e5ff","size":40}},
-            gauge={"axis":{"range":[0,100],"tickcolor":"#334155"},
-                   "bar":{"color":"#00e5ff","thickness":0.7},
-                   "bgcolor":"rgba(255,255,255,0.03)", "borderwidth":0,
-                   "steps":[{"range":[0,30],"color":"rgba(248,113,113,0.15)"},
-                            {"range":[30,60],"color":"rgba(251,191,36,0.1)"},
-                            {"range":[60,100],"color":"rgba(52,211,153,0.1)"}]}))
-        fig.update_layout(height=250, margin=dict(t=40,b=10,l=30,r=30), paper_bgcolor=BG, font_color="#94a3b8")
+            title={"text":"WiFi Signal Quality", "font":{"color":"#a1a1aa","size":14}},
+            number={"suffix":"%", "font":{"color":"#fafafa","size":36}},
+            gauge={"axis":{"range":[0,100],"tickcolor":"rgba(255,255,255,0.15)","tickfont":{"color":"#71717a"}},
+                   "bar":{"color":"#6366f1","thickness":0.6},
+                   "bgcolor":"rgba(255,255,255,0.04)", "borderwidth":0,
+                   "steps":[{"range":[0,30],"color":"rgba(239,68,68,0.15)"},
+                            {"range":[30,60],"color":"rgba(245,158,11,0.15)"},
+                            {"range":[60,100],"color":"rgba(16,185,129,0.15)"}]}))
+        fig.update_layout(height=250, margin=dict(t=40,b=10,l=30,r=30), paper_bgcolor=BG, font_color="#a1a1aa")
         st.plotly_chart(fig, use_container_width=True)
 
-# ── Tab 7: AI Threat Analyst ──────────────────
+# ── Tab 7: Attack Map ────────────────────────
 
 with tab7:
-    st.markdown("""<div class="sec-h"><div class="sec-dot" style="background:#00e5ff; color:#00e5ff;"></div>
-        <h3>AI Threat Analyst</h3></div>""", unsafe_allow_html=True)
-    st.markdown("""<div class="glass" style="margin-bottom:1rem;">
-        <div style="color:#94a3b8; font-size:0.85rem;">
-        Ask me anything about your network traffic. Try: <b>"summary"</b>, <b>"most dangerous IP"</b>,
-        <b>"show port scans"</b>, <b>"threat level"</b>, or ask about a specific IP address.
-        </div></div>""", unsafe_allow_html=True)
-
-    if "chat_history" not in st.session_state:
-        st.session_state.chat_history = []
-
-    for msg in st.session_state.chat_history:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-
-    user_query = st.chat_input("Ask the AI Threat Analyst...")
-    if user_query:
-        st.session_state.chat_history.append({"role": "user", "content": user_query})
-        with st.chat_message("user"):
-            st.markdown(user_query)
-
-        response = ai_threat_analyst(user_query, df, anomaly_df)
-        st.session_state.chat_history.append({"role": "assistant", "content": response})
-        with st.chat_message("assistant"):
-            st.markdown(response)
-
-# ── Tab 8: Attack Map ────────────────────────
-
-with tab8:
-    st.markdown("""<div class="sec-h"><div class="sec-dot" style="background:#e040fb; color:#e040fb;"></div>
-        <h3>Global Attack Map</h3></div>""", unsafe_allow_html=True)
+    st.markdown("""<div class="sec-h"><h3>Global Attack Map</h3></div>""", unsafe_allow_html=True)
 
     if len(anomaly_df) > 0:
         attacker_ips = anomaly_df["src_ip"].unique().tolist()
@@ -1194,13 +1688,13 @@ with tab8:
 
             fig = go.Figure()
 
-            # Attack lines from source to local position (center of map)
+            # Attack lines
             for _, row in geo_df.iterrows():
                 fig.add_trace(go.Scattergeo(
                     lon=[row["lon"], None],
                     lat=[row["lat"], None],
                     mode="lines",
-                    line=dict(width=1, color="rgba(248,113,113,0.4)"),
+                    line=dict(width=1, color="rgba(239,68,68,0.35)"),
                     showlegend=False,
                     hoverinfo="skip",
                 ))
@@ -1214,56 +1708,54 @@ with tab8:
                 mode="markers",
                 marker=dict(
                     size=geo_df["attacks"].clip(upper=30) * 2 + 6,
-                    color="#f87171",
-                    opacity=0.8,
-                    line=dict(width=1, color="#ff5252"),
+                    color="#ef4444",
+                    opacity=0.85,
+                    line=dict(width=1, color="#fca5a5"),
                     sizemode="diameter",
                 ),
                 name="Attackers",
             ))
 
             fig.update_geos(
-                bgcolor="rgba(10,14,26,0.9)",
-                landcolor="rgba(30,40,60,0.8)",
-                oceancolor="rgba(10,14,26,0.9)",
-                lakecolor="rgba(10,14,26,0.5)",
-                coastlinecolor="rgba(0,229,255,0.3)",
-                countrycolor="rgba(0,229,255,0.15)",
+                bgcolor="rgba(0,0,0,0)",
+                landcolor="rgba(255,255,255,0.04)",
+                oceancolor="rgba(0,0,0,0)",
+                lakecolor="rgba(0,0,0,0)",
+                coastlinecolor="rgba(99,102,241,0.35)",
+                countrycolor="rgba(255,255,255,0.08)",
                 showframe=False,
                 projection_type="natural earth",
             )
             fig.update_layout(
                 height=500,
                 paper_bgcolor="rgba(0,0,0,0)",
-                geo=dict(bgcolor="rgba(10,14,26,0.9)"),
+                geo=dict(bgcolor="rgba(0,0,0,0)"),
                 margin=dict(t=10, b=10, l=0, r=0),
                 showlegend=False,
             )
             st.plotly_chart(fig, use_container_width=True)
 
             # Attacker table with geo info
-            st.markdown("""<div class="sec-h"><div class="sec-dot" style="background:#ff5252; color:#ff5252;"></div>
-                <h3>Attacker Locations</h3></div>""", unsafe_allow_html=True)
+            st.markdown("""<div class="sec-h"><h3>Attacker Locations</h3></div>""", unsafe_allow_html=True)
             display_geo = geo_df[["ip", "city", "country", "isp", "attacks", "attack_types"]].copy()
             display_geo.columns = ["IP Address", "City", "Country", "ISP", "Attacks", "Attack Types"]
             st.dataframe(display_geo.sort_values("Attacks", ascending=False), use_container_width=True, hide_index=True)
         else:
             st.info("Could not geolocate attacker IPs. They may all be private/local addresses.")
     else:
-        st.markdown("""<div class="alert-banner ab-safe"><div class="ab-icon">🌍</div>
+        st.markdown("""<div class="alert-banner ab-safe">
             <div><div class="ab-title">No Attacks to Map</div>
             <div class="ab-desc">No anomalous traffic detected. The map will populate when threats are found.</div></div></div>""",
             unsafe_allow_html=True)
 
-# ── Tab 9: PDF Report ────────────────────────
+# ── Tab 8: PDF Report ────────────────────────
 
-with tab9:
-    st.markdown("""<div class="sec-h"><div class="sec-dot" style="background:#ffd740; color:#ffd740;"></div>
-        <h3>Security Threat Report</h3></div>""", unsafe_allow_html=True)
+with tab8:
+    st.markdown("""<div class="sec-h"><h3>Security Threat Report</h3></div>""", unsafe_allow_html=True)
 
     st.markdown("""<div class="glass">
-        <div style="color:#e2e8f0; font-weight:600; font-size:1rem; margin-bottom:0.5rem;">Generate PDF Report</div>
-        <div style="color:#94a3b8; font-size:0.85rem;">
+        <div style="color:#fafafa; font-weight:600; font-size:0.95rem; margin-bottom:0.4rem;">Generate PDF Report</div>
+        <div style="color:#a1a1aa; font-size:0.85rem;">
         Download a professional security report with executive summary, attack breakdown,
         top attacker analysis, and actionable recommendations. Share it with your team or management.
         </div></div>""", unsafe_allow_html=True)
@@ -1310,4 +1802,271 @@ with tab9:
 # Footer
 # ──────────────────────────────────────────────
 
-st.markdown('<div class="cyber-footer">🛡️ NetWatchAI — AI-Powered Network Monitoring & Intrusion Detection</div>', unsafe_allow_html=True)
+# ── Tab: Settings ─────────────────────────────
+
+with tab_settings:
+    cfg = app_config.load_config()
+
+    st.markdown("""<div class="sec-h"><h3>Alert Channels</h3></div>""", unsafe_allow_html=True)
+    st.caption("Get pinged when NetWatchAI detects a threat. All channels are optional and free.")
+
+    with st.form("channels_form"):
+        col_a, col_b = st.columns(2)
+        with col_a:
+            discord = st.text_input(
+                "Discord webhook URL",
+                value=cfg["alerts"].get("discord_webhook", ""),
+                placeholder="https://discord.com/api/webhooks/...",
+            )
+            slack = st.text_input(
+                "Slack webhook URL",
+                value=cfg["alerts"].get("slack_webhook", ""),
+                placeholder="https://hooks.slack.com/services/...",
+            )
+            severity = st.selectbox(
+                "Minimum severity to notify",
+                options=["low", "medium", "high", "critical"],
+                index=["low", "medium", "high", "critical"].index(
+                    cfg["alerts"].get("min_severity", "high")
+                ),
+            )
+        with col_b:
+            email_cfg = cfg["alerts"].get("email", {})
+            smtp_host = st.text_input("SMTP host", value=email_cfg.get("smtp_host", ""), placeholder="smtp.gmail.com")
+            smtp_port = st.number_input("SMTP port", value=int(email_cfg.get("smtp_port", 587)), step=1)
+            smtp_user = st.text_input("SMTP username", value=email_cfg.get("username", ""))
+            smtp_pass = st.text_input("SMTP password / app token", value=email_cfg.get("password", ""), type="password")
+            smtp_to = st.text_input("Send alerts to", value=email_cfg.get("to", ""))
+
+        if st.form_submit_button("Save settings", use_container_width=True):
+            cfg["alerts"]["discord_webhook"] = discord.strip()
+            cfg["alerts"]["slack_webhook"] = slack.strip()
+            cfg["alerts"]["min_severity"] = severity
+            cfg["alerts"]["email"] = {
+                "smtp_host": smtp_host.strip(),
+                "smtp_port": int(smtp_port),
+                "username": smtp_user.strip(),
+                "password": smtp_pass,
+                "to": smtp_to.strip(),
+            }
+            app_config.save_config(cfg)
+            storage.log_audit("user", "settings_update", "alert channels")
+            st.success("Settings saved.")
+
+    if st.button("Send test alert", key="test_alert_btn"):
+        result = alerting.dispatch(
+            cfg,
+            title="NetWatchAI: test alert",
+            body="This is a test. If you see this, the channel works.",
+            severity="critical",
+        )
+        if result.get("skipped"):
+            st.warning("Test skipped: severity below threshold.")
+        elif not result:
+            st.warning("No channels configured yet.")
+        else:
+            st.success(f"Dispatched: {result}")
+
+    st.markdown("---")
+    st.markdown("""<div class="sec-h"><h3>Allowlist</h3></div>""", unsafe_allow_html=True)
+    st.caption("IPs here will never trigger an anomaly. Useful for internal scanners and monitoring tools.")
+
+    allow = storage.list_allowlist()
+    with st.form("allow_form", clear_on_submit=True):
+        col_x, col_y, col_z = st.columns([2, 3, 1])
+        with col_x:
+            new_ip = st.text_input("IP address", placeholder="10.0.0.5")
+        with col_y:
+            new_note = st.text_input("Note", placeholder="Internal scanner")
+        with col_z:
+            st.markdown("<div style='height:1.85rem'></div>", unsafe_allow_html=True)
+            if st.form_submit_button("Add", use_container_width=True):
+                if new_ip.strip():
+                    storage.add_allowlist(new_ip.strip(), new_note.strip())
+                    storage.log_audit("user", "allowlist_add", new_ip.strip())
+                    st.rerun()
+
+    if allow:
+        for item in allow:
+            c1, c2, c3 = st.columns([2, 4, 1])
+            with c1:
+                st.markdown(
+                    f"<span style='font-family:JetBrains Mono,monospace;'>{item['ip']}</span>",
+                    unsafe_allow_html=True,
+                )
+            with c2:
+                st.markdown(
+                    f"<span style='color:#a1a1aa;font-size:0.85rem;'>{item.get('note') or '(no note)'}</span>",
+                    unsafe_allow_html=True,
+                )
+            with c3:
+                if st.button("Remove", key=f"rm_{item['ip']}"):
+                    storage.remove_allowlist(item["ip"])
+                    storage.log_audit("user", "allowlist_remove", item["ip"])
+                    st.rerun()
+    else:
+        st.caption("No allowlisted IPs yet.")
+
+    st.markdown("---")
+    st.markdown("""<div class="sec-h"><h3>Data Retention</h3></div>""", unsafe_allow_html=True)
+    st.caption("How long to keep stored alerts before automatic deletion.")
+
+    col_r1, col_r2 = st.columns([3, 1])
+    with col_r1:
+        retention = st.slider(
+            "Retention window (days)",
+            min_value=7, max_value=365,
+            value=int(cfg.get("retention_days", 30)),
+        )
+    with col_r2:
+        st.markdown("<div style='height:1.85rem'></div>", unsafe_allow_html=True)
+        if st.button("Save & purge now", use_container_width=True):
+            cfg["retention_days"] = int(retention)
+            app_config.save_config(cfg)
+            removed = storage.purge_older_than(int(retention))
+            storage.log_audit("user", "purge", f"{removed} rows (>{retention}d)")
+            st.success(f"Saved. Purged {removed} old alert(s).")
+
+    st.markdown("---")
+    st.markdown("""<div class="sec-h"><h3>Login & Security</h3></div>""", unsafe_allow_html=True)
+
+    if _auth_enabled:
+        st.caption(
+            "Login is currently **enabled**. Anyone visiting the dashboard must enter your password."
+        )
+        col_s1, col_s2 = st.columns(2)
+        with col_s1:
+            with st.form("change_pw_form", clear_on_submit=True, border=False):
+                new_pw_input = st.text_input(
+                    "Change password", type="password",
+                    placeholder="New password (at least 6 characters)",
+                )
+                if st.form_submit_button("Update password", use_container_width=True):
+                    try:
+                        auth.set_password(new_pw_input)
+                        storage.log_audit("user", "password_change")
+                        st.success("Password updated.")
+                    except ValueError as e:
+                        st.error(str(e))
+        with col_s2:
+            if st.button("Disable login (remove password)", use_container_width=True):
+                auth.reset()
+                storage.log_audit("user", "auth_disable")
+                st.success("Login disabled. Refresh the page — the dashboard will open without prompting.")
+    else:
+        st.caption(
+            "Login is currently **disabled**. The dashboard opens directly to anyone who can reach it. "
+            "This is fine for local use. For any public deploy, set a password."
+        )
+        with st.form("enable_auth_form", clear_on_submit=True, border=False):
+            col_ea1, col_ea2 = st.columns([3, 1])
+            with col_ea1:
+                set_pw_input = st.text_input(
+                    "Set a password to enable login",
+                    type="password",
+                    placeholder="Choose a password (at least 6 characters)",
+                    label_visibility="collapsed",
+                )
+            with col_ea2:
+                if st.form_submit_button("Enable login", use_container_width=True):
+                    try:
+                        auth.set_password(set_pw_input)
+                        storage.log_audit("user", "auth_enable")
+                        st.success("Login enabled. Refresh the page to sign in.")
+                    except ValueError as e:
+                        st.error(str(e))
+
+    st.markdown(
+        "<div style='color:#a1a1aa;font-size:0.82rem;margin-top:0.75rem;'>"
+        "For server / public deploys, set the <code>NETWATCHAI_PASSWORD</code> environment variable. "
+        "It overrides any password set in the UI."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("---")
+    st.markdown("""<div class="sec-h"><h3>Threat Intelligence</h3></div>""", unsafe_allow_html=True)
+    st.caption(
+        "NetWatchAI checks every source IP against free threat-intel feeds. "
+        "Matches are automatically flagged as 'Known Malicious' in the dashboard. "
+        "Feeds refresh once a day."
+    )
+
+    _ti_stats = threat_intel.stats(_ti_iocs)
+    _ti_meta = threat_intel.last_updated()
+    for _fid, _feed in threat_intel.FEEDS.items():
+        _count = _ti_stats.get(_fid, 0)
+        _last = _ti_meta.get(_fid, {}).get("updated_at", 0)
+        _last_txt = (
+            datetime.fromtimestamp(_last).strftime("%Y-%m-%d %H:%M")
+            if _last else "not yet downloaded"
+        )
+        _dot_color = "#10b981" if _count > 0 else "#71717a"
+        st.markdown(
+            f"""<div class="ni-card" style="display:flex;justify-content:space-between;align-items:center;">
+                <div>
+                    <div class="ni-lbl">{_fid.replace('_', ' ').title()}</div>
+                    <div style="color:#a1a1aa;font-size:0.82rem;margin-top:0.1rem;">
+                        {_feed['description']}
+                    </div>
+                </div>
+                <div style="text-align:right;">
+                    <div style="color:{_dot_color};font-weight:600;font-size:1rem;">
+                        {_count:,} indicators
+                    </div>
+                    <div style="color:#71717a;font-size:0.72rem;">
+                        Last updated: {_last_txt}
+                    </div>
+                </div>
+            </div>""",
+            unsafe_allow_html=True,
+        )
+
+    if st.button("Refresh feeds now", key="ti_refresh_btn"):
+        with st.spinner("Downloading threat-intel feeds..."):
+            _result = threat_intel.refresh_if_stale(force=True)
+            _load_threat_intel.clear()  # bust the streamlit cache
+            storage.log_audit("user", "ti_refresh", ", ".join(
+                f"{k}={v['status']}" for k, v in _result.items()
+            ))
+        ok = sum(1 for v in _result.values() if v["status"] == "refreshed")
+        failed = sum(1 for v in _result.values() if v["status"] == "failed")
+        if failed:
+            st.warning(f"{ok} feed(s) refreshed, {failed} failed. Check your internet connection.")
+        else:
+            st.success(f"{ok} feed(s) refreshed successfully.")
+
+    st.markdown("---")
+    st.markdown("""<div class="sec-h"><h3>Audit Log</h3></div>""", unsafe_allow_html=True)
+    audit_rows = storage.list_audit(limit=50)
+    if audit_rows:
+        audit_df = pd.DataFrame(audit_rows)[["ts", "actor", "action", "detail"]]
+        st.dataframe(audit_df, use_container_width=True, hide_index=True, height=280)
+    else:
+        st.caption("No audit events recorded yet.")
+
+    st.markdown("---")
+    st.markdown("""<div class="sec-h"><h3>Export</h3></div>""", unsafe_allow_html=True)
+    col_e1, col_e2 = st.columns(2)
+    with col_e1:
+        if st.button("Download alerts as JSON", use_container_width=True):
+            alerts_json = json.dumps(storage.list_alerts(days=365, include_fp=True), indent=2)
+            st.download_button(
+                "Save JSON",
+                data=alerts_json,
+                file_name=f"netwatchai_alerts_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                mime="application/json",
+                use_container_width=True,
+            )
+    with col_e2:
+        if st.button("Download alerts as CSV", use_container_width=True):
+            alerts_df = pd.DataFrame(storage.list_alerts(days=365, include_fp=True))
+            st.download_button(
+                "Save CSV",
+                data=alerts_df.to_csv(index=False) if not alerts_df.empty else "",
+                file_name=f"netwatchai_alerts_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+st.markdown('<div class="app-footer">NetWatchAI <span class="dot"></span> Network Monitoring and Intrusion Detection</div>', unsafe_allow_html=True)
