@@ -1,0 +1,151 @@
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: netwatchai-core
+    folder: NetWatchAI
+    interval: 1m
+    rules:
+      - uid: nw-exporter-down
+        title: NetWatchAI exporter is down
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: prometheus
+            model:
+              expr: up{job="netwatchai"}
+              intervalMs: 60000
+              maxDataPoints: 10
+              refId: A
+          - refId: B
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              reducer: last
+              expression: A
+              refId: B
+          - refId: C
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: B
+              refId: C
+              conditions:
+                - evaluator: {type: lt, params: [1]}
+        for: 5m
+        annotations:
+          summary: Prometheus cannot scrape the NetWatchAI metrics exporter.
+          runbook: Check `docker compose ps exporter` and `docker logs netwatchai-exporter`.
+        labels:
+          severity: critical
+
+      - uid: nw-db-unreachable
+        title: NetWatchAI alert DB unreachable
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: prometheus
+            model:
+              expr: netwatchai_db_up
+              intervalMs: 60000
+              maxDataPoints: 10
+              refId: A
+          - refId: B
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              reducer: last
+              expression: A
+              refId: B
+          - refId: C
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: B
+              refId: C
+              conditions:
+                - evaluator: {type: lt, params: [1]}
+        for: 5m
+        annotations:
+          summary: SQLite alert store is unreachable from the exporter.
+          runbook: Confirm `data/netwatchai.db` exists and the `exporter` container has the data volume mounted.
+        labels:
+          severity: critical
+
+      - uid: nw-open-alerts-high
+        title: Open alerts unusually high
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: prometheus
+            model:
+              expr: netwatchai_alerts_open
+              intervalMs: 60000
+              maxDataPoints: 10
+              refId: A
+          - refId: B
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              reducer: last
+              expression: A
+              refId: B
+          - refId: C
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: B
+              refId: C
+              conditions:
+                - evaluator: {type: gt, params: [100]}
+        for: 15m
+        annotations:
+          summary: More than 100 alerts in `status='new'`. Triage backlog is growing.
+          runbook: Open the Streamlit dashboard, filter by severity, and either action or mark false positive.
+        labels:
+          severity: warning
+
+      - uid: nw-alert-rate-spike
+        title: Alert rate spike
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 1800, to: 0}
+            datasourceUid: prometheus
+            model:
+              expr: sum(increase(netwatchai_alerts_total[5m]))
+              intervalMs: 60000
+              maxDataPoints: 30
+              refId: A
+          - refId: B
+            relativeTimeRange: {from: 1800, to: 0}
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              reducer: last
+              expression: A
+              refId: B
+          - refId: C
+            relativeTimeRange: {from: 1800, to: 0}
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: B
+              refId: C
+              conditions:
+                - evaluator: {type: gt, params: [50]}
+        for: 10m
+        annotations:
+          summary: More than 50 new alerts in the last 5 minutes. Possible attack in progress.
+          runbook: Check the Attack Map and Top Source IPs panels for concentrated origin.
+        labels:
+          severity: warning

@@ -1,9 +1,14 @@
 """Tests for the SQLite persistence layer."""
 import os
 import tempfile
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
+
+
+def _utcnow_iso() -> str:
+    """ISO timestamp in UTC. Replaces the deprecated datetime.utcnow()."""
+    return datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
 
 
 @pytest.fixture(autouse=True)
@@ -23,7 +28,7 @@ def test_record_and_list_alerts():
     from src import storage
 
     storage.record_alerts([{
-        "ts": datetime.utcnow().isoformat(),
+        "ts": _utcnow_iso(),
         "src_ip": "10.0.0.1",
         "dst_ip": "10.0.0.2",
         "protocol": "TCP",
@@ -49,7 +54,7 @@ def test_alert_exists_detects_duplicate():
     from src import storage
 
     row = {
-        "ts": datetime.utcnow().isoformat(), "src_ip": "2.2.2.2", "dst_ip": "1.1.1.1",
+        "ts": _utcnow_iso(), "src_ip": "2.2.2.2", "dst_ip": "1.1.1.1",
         "protocol": "TCP", "src_port": 1, "dst_port": 2, "packet_size": 10, "flags": "S",
         "attack_type": "Port Scan", "dedup_key": "k-abc",
     }
@@ -62,7 +67,7 @@ def test_mark_false_positive_hides_alert():
     from src import storage
 
     storage.record_alerts([{
-        "ts": datetime.utcnow().isoformat(), "src_ip": "3.3.3.3", "dst_ip": "4.4.4.4",
+        "ts": _utcnow_iso(), "src_ip": "3.3.3.3", "dst_ip": "4.4.4.4",
         "protocol": "TCP", "src_port": 1, "dst_port": 2, "packet_size": 10, "flags": "S",
         "attack_type": "Port Scan", "dedup_key": "k-fp",
     }])
@@ -95,8 +100,8 @@ def test_audit_log_append_and_read():
 def test_purge_older_than_removes_old_rows():
     from src import storage
 
-    old_ts = (datetime.utcnow() - timedelta(days=40)).isoformat()
-    fresh_ts = datetime.utcnow().isoformat()
+    old_ts = (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=40)).isoformat()
+    fresh_ts = _utcnow_iso()
     storage.record_alerts([
         {"ts": old_ts, "src_ip": "7.7.7.7", "dst_ip": "", "protocol": "",
          "src_port": 0, "dst_port": 0, "packet_size": 0, "flags": "",

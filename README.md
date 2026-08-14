@@ -90,6 +90,17 @@ docker compose up -d
 
 Open **http://localhost:8501**.
 
+Docker Compose also brings up a Prometheus + Grafana observability stack:
+
+| Service | URL | Notes |
+|---------|-----|-------|
+| Streamlit dashboard | http://localhost:8501 | main app |
+| Metrics exporter | http://localhost:9100/metrics | Prometheus format |
+| Prometheus | http://localhost:9090 | scrapes the exporter |
+| Grafana | http://localhost:3000 | login `admin` / `admin` (override with `GRAFANA_PASSWORD`) |
+
+The **NetWatchAI Overview** dashboard is auto-provisioned in Grafana with panels for open alerts, attack-type breakdown, top source IPs, and alert rate over time.
+
 <details>
 <summary><b>Quick comparison — which option should I pick?</b></summary>
 
@@ -145,6 +156,27 @@ Network Traffic → Scapy Capture → Feature Extraction → ML Model → Dashbo
 | **Settings** | Configure Discord / Slack / email alerts, allowlist, retention, rotate password, view audit log, export data |
 
 **Threat Levels:** GREEN (0-5%) → YELLOW (5-15%) → ORANGE (15-30%) → RED (>30% anomaly rate)
+
+---
+
+## Sign in with GitHub (optional)
+
+NetWatchAI ships with a single-password gate by default. For multi-user / production use, you can layer **GitHub OAuth** on top — the "Sign in with GitHub" button appears on the login screen as soon as the three env vars are present.
+
+1. Go to https://github.com/settings/developers → **New OAuth App**
+2. Set the **Authorization callback URL** to `http://localhost:8501/` (or your real domain)
+3. Copy the **Client ID** and **Client Secret** into your `.env`:
+
+```bash
+GITHUB_OAUTH_CLIENT_ID=...
+GITHUB_OAUTH_CLIENT_SECRET=...
+GITHUB_OAUTH_REDIRECT_URI=http://localhost:8501/
+ALLOWED_GITHUB_USERS=your-github-username   # optional comma-separated allowlist
+```
+
+4. `docker compose up -d --build dashboard`
+
+If `ALLOWED_GITHUB_USERS` is blank, any GitHub user can sign in. Set it for a private deployment. The password gate stays available alongside — the two paths are independent.
 
 ---
 
@@ -313,7 +345,10 @@ NetWatchAI/
 │   └── sample_packets.csv    # Sample training data (228 packets)
 ├── models/
 │   └── model.pkl             # Trained model (auto-generated)
-├── tests/                    # 300+ tests with pytest
+├── tests/                    # 440+ tests with pytest, including
+│                             # `test_detection_quality.py` — precision/recall
+│                             # regression test that fails the build if model
+│                             # quality drops below baseline floors
 │
 ├── Dockerfile                # Container build
 ├── docker-compose.yml        # Docker Compose setup

@@ -1,4 +1,5 @@
 """SQLite persistence for alerts, allowlist, feedback, and audit log."""
+import hashlib
 import os
 import sqlite3
 from collections.abc import Iterator
@@ -6,6 +7,10 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 
 from src.utils import DATA_DIR
+
+# Sentinel for the first row in the audit chain. Any 64-hex string works as long as
+# it's well-known; zeros are conventional for genesis blocks.
+_AUDIT_GENESIS_HASH = "0" * 64
 
 DB_PATH = os.path.join(DATA_DIR, "netwatchai.db")
 
@@ -32,6 +37,8 @@ CREATE TABLE IF NOT EXISTS alerts (
 CREATE INDEX IF NOT EXISTS idx_alerts_ts ON alerts(ts);
 CREATE INDEX IF NOT EXISTS idx_alerts_dedup ON alerts(dedup_key);
 CREATE INDEX IF NOT EXISTS idx_alerts_src ON alerts(src_ip);
+-- Covering index for the hot path: dashboard + exporter both filter by ts and marked_fp.
+CREATE INDEX IF NOT EXISTS idx_alerts_ts_fp ON alerts(ts, marked_fp);
 
 CREATE TABLE IF NOT EXISTS allowlist (
     ip TEXT PRIMARY KEY,
@@ -44,7 +51,9 @@ CREATE TABLE IF NOT EXISTS audit_log (
     ts TEXT NOT NULL,
     actor TEXT,
     action TEXT NOT NULL,
-    detail TEXT
+    detail TEXT,
+    prev_hash TEXT,
+    row_hash TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts);
 
@@ -55,7 +64,33 @@ CREATE TABLE IF NOT EXISTS feedback (
     label TEXT NOT NULL,
     actor TEXT
 );
+
+CREATE TABLE IF NOT EXISTS alert_explanations (
+    alert_id INTEGER PRIMARY KEY,
+    ts TEXT NOT NULL,
+    model TEXT,
+    explanation TEXT NOT NULL,
+    FOREIGN KEY (alert_id) REFERENCES alerts(id) ON DELETE CASCADE
+);
 """
+
+
+def get_explanation(alert_id: int) -> dict | None:
+    with _conn() as c:
+        row = c.execute(
+            "SELECT alert_id, ts, model, explanation FROM alert_explanations WHERE alert_id=?",
+            (alert_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def save_explanation(alert_id: int, explanation: str, model: str) -> None:
+    with _conn() as c:
+        c.execute(
+            "INSERT OR REPLACE INTO alert_explanations (alert_id, ts, model, explanation) "
+            "VALUES (?, ?, ?, ?)",
+            (alert_id, _utc_now().isoformat(), model, explanation),
+        )
 
 
 @contextmanager
@@ -70,9 +105,72 @@ def _conn() -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
+def _compute_row_hash(prev_hash: str, ts: str, actor: str | None, action: str, detail: str | None) -> str:
+    # Order matters — must match verification. Use NUL bytes as separators so e.g.
+    # actor="a|b" and detail="c" can't collide with actor="a" and detail="b|c".
+    payload = "\x00".join([prev_hash, ts, actor or "", action, detail or ""])
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _ensure_audit_columns(c: sqlite3.Connection) -> None:
+    cols = {row[1] for row in c.execute("PRAGMA table_info(audit_log)")}
+    if "prev_hash" not in cols:
+        c.execute("ALTER TABLE audit_log ADD COLUMN prev_hash TEXT")
+    if "row_hash" not in cols:
+        c.execute("ALTER TABLE audit_log ADD COLUMN row_hash TEXT")
+
+
+def _backfill_audit_chain(c: sqlite3.Connection) -> int:
+    """Compute hashes for any rows missing them. Returns rows updated."""
+    rows = list(c.execute(
+        "SELECT id, ts, actor, action, detail, prev_hash, row_hash "
+        "FROM audit_log ORDER BY id ASC"
+    ))
+    prev = _AUDIT_GENESIS_HASH
+    updates = []
+    for r in rows:
+        rid, ts, actor, action, detail, stored_prev, stored_hash = r
+        if stored_hash:
+            prev = stored_hash
+            continue
+        new_hash = _compute_row_hash(prev, ts, actor, action, detail)
+        updates.append((prev, new_hash, rid))
+        prev = new_hash
+    if updates:
+        c.executemany(
+            "UPDATE audit_log SET prev_hash=?, row_hash=? WHERE id=?",
+            updates,
+        )
+    return len(updates)
+
+
 def init_db() -> None:
     with _conn() as c:
         c.executescript(_SCHEMA)
+        _ensure_audit_columns(c)
+        _backfill_audit_chain(c)
+
+
+def verify_audit_chain() -> dict:
+    """Walk the audit log and verify each row's hash matches its computed value.
+
+    Returns {ok, total, first_broken_id} where first_broken_id is None if intact.
+    """
+    with _conn() as c:
+        rows = list(c.execute(
+            "SELECT id, ts, actor, action, detail, prev_hash, row_hash "
+            "FROM audit_log ORDER BY id ASC"
+        ))
+    prev = _AUDIT_GENESIS_HASH
+    for r in rows:
+        rid, ts, actor, action, detail, stored_prev, stored_hash = r
+        if stored_prev != prev:
+            return {"ok": False, "total": len(rows), "first_broken_id": rid, "reason": "prev_hash mismatch"}
+        expected = _compute_row_hash(prev, ts, actor, action, detail)
+        if expected != stored_hash:
+            return {"ok": False, "total": len(rows), "first_broken_id": rid, "reason": "row_hash mismatch"}
+        prev = stored_hash
+    return {"ok": True, "total": len(rows), "first_broken_id": None}
 
 
 def record_alerts(rows: list[dict]) -> int:
@@ -143,10 +241,18 @@ def is_allowlisted(ip: str) -> bool:
 
 
 def log_audit(actor: str, action: str, detail: str = "") -> None:
+    ts = _utc_now().isoformat()
     with _conn() as c:
+        prev_row = c.execute(
+            "SELECT row_hash FROM audit_log WHERE row_hash IS NOT NULL "
+            "ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        prev_hash = prev_row["row_hash"] if prev_row else _AUDIT_GENESIS_HASH
+        row_hash = _compute_row_hash(prev_hash, ts, actor, action, detail)
         c.execute(
-            "INSERT INTO audit_log (ts, actor, action, detail) VALUES (?, ?, ?, ?)",
-            (_utc_now().isoformat(), actor, action, detail),
+            "INSERT INTO audit_log (ts, actor, action, detail, prev_hash, row_hash) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (ts, actor, action, detail, prev_hash, row_hash),
         )
 
 

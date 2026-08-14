@@ -30,6 +30,10 @@ RUN groupadd -r netwatchai && useradd -r -g netwatchai -d /app netwatchai \
 
 USER netwatchai
 
+# Open by default (no login screen). Set NETWATCHAI_DEMO=0 and NETWATCHAI_PASSWORD=...
+# at runtime to enable auth for a private deployment.
+ENV NETWATCHAI_DEMO=1
+
 # Expose Streamlit port
 EXPOSE 8501
 

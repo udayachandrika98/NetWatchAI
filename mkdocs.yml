@@ -32,6 +32,7 @@ nav:
   - Home: index.md
   - Install: install.md
   - Configure Alerts: alerts.md
+  - Observability: observability.md
   - Architecture: architecture.md
   - Contributing: contributing.md
 

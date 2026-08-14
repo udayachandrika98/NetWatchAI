@@ -8,6 +8,7 @@ Usage:
 """
 
 import argparse
+
 from src.model import train_model
 from src.utils import SAMPLE_CSV
 

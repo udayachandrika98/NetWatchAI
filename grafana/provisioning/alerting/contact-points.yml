@@ -1,0 +1,14 @@
+apiVersion: 1
+
+# Default contact point. Edit `addresses` (and/or change `type` to slack/discord/webhook/pagerduty)
+# to deliver alerts to a real channel, then `docker compose restart grafana`.
+contactPoints:
+  - orgId: 1
+    name: default-contact
+    receivers:
+      - uid: default-contact-uid
+        type: email
+        settings:
+          addresses: ops@example.com
+          singleEmail: false
+        disableResolveMessage: false

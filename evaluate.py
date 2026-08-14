@@ -15,29 +15,35 @@ This script:
 5. Saves all results to the output directory
 """
 
-import os
-import sys
 import argparse
-import warnings
+import os
 import time
-import pandas as pd
-import numpy as np
+import warnings
+
 import matplotlib
+import numpy as np
+import pandas as pd
+
 matplotlib.use('Agg')  # Non-interactive backend
+
 import matplotlib.pyplot as plt
 import seaborn as sns
-from io import StringIO
-
 from sklearn.ensemble import IsolationForest, RandomForestClassifier
-from sklearn.tree import DecisionTreeClassifier
-from sklearn.svm import SVC
-from sklearn.preprocessing import LabelEncoder, StandardScaler
-from sklearn.model_selection import train_test_split
 from sklearn.metrics import (
-    accuracy_score, precision_score, recall_score, f1_score,
-    confusion_matrix, classification_report, roc_curve, auc,
-    precision_recall_curve, average_precision_score,
+    accuracy_score,
+    auc,
+    average_precision_score,
+    classification_report,
+    confusion_matrix,
+    f1_score,
+    precision_recall_curve,
+    precision_score,
+    recall_score,
+    roc_curve,
 )
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.svm import SVC
+from sklearn.tree import DecisionTreeClassifier
 
 warnings.filterwarnings('ignore')
 
@@ -298,7 +304,7 @@ def plot_attack_distribution(train_df, test_df, output_dir):
     """Plot attack category distribution in the dataset."""
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
-    for ax, (name, data) in zip(axes, [('Training Set', train_df), ('Test Set', test_df)]):
+    for ax, (name, data) in zip(axes, [('Training Set', train_df), ('Test Set', test_df)], strict=True):
         counts = data['attack_category'].value_counts()
         colors = ['#34d399', '#f87171', '#fbbf24', '#00e5ff', '#7c4dff']
         ax.pie(counts.values, labels=counts.index, autopct='%1.1f%%',
@@ -324,7 +330,7 @@ def plot_training_time(time_dict, output_dir):
     plt.ylabel('Time (seconds)', fontsize=12)
     plt.grid(axis='y', alpha=0.3)
 
-    for bar, t in zip(bars, times):
+    for bar, t in zip(bars, times, strict=True):
         plt.text(bar.get_x() + bar.get_width()/2., bar.get_height() + 0.1,
                 f'{t:.2f}s', ha='center', fontsize=11, fontweight='bold')
 
@@ -488,7 +494,7 @@ def main():
         f.write("=" * 60 + "\n")
         f.write("  NetWatchAI — Model Evaluation Report\n")
         f.write("=" * 60 + "\n\n")
-        f.write(f"Dataset: NSL-KDD\n")
+        f.write("Dataset: NSL-KDD\n")
         f.write(f"Training samples: {len(train_df):,}\n")
         f.write(f"Test samples: {len(test_df):,}\n\n")
 
@@ -528,7 +534,7 @@ def main():
         f.write(f"  F1-Score:  {best_model['F1-Score']:.4f}\n\n")
 
         iso_metrics = metrics_list[0]  # Isolation Forest is always first
-        f.write(f"Isolation Forest (NetWatchAI's model):\n")
+        f.write("Isolation Forest (NetWatchAI's model):\n")
         f.write(f"  Accuracy:  {iso_metrics['Accuracy']:.4f}\n")
         f.write(f"  Precision: {iso_metrics['Precision']:.4f}\n")
         f.write(f"  Recall:    {iso_metrics['Recall']:.4f}\n")
@@ -539,7 +545,7 @@ def main():
         f.write("This is a significant advantage in real-world scenarios where labeled\n")
         f.write("attack data is often unavailable.\n")
 
-    print(f"      Saved: evaluation_report.txt")
+    print("      Saved: evaluation_report.txt")
     print()
 
     # Print summary

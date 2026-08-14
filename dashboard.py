@@ -22,7 +22,7 @@ import requests
 from fpdf import FPDF
 from src.detector import AnomalyDetector
 from src.utils import PACKETS_CSV, SAMPLE_CSV, MODEL_PATH
-from src import storage, auth, alerting, config as app_config, threat_intel, behavior
+from src import storage, auth, alerting, config as app_config, threat_intel, behavior, ai_explainer, oauth_github
 
 storage.init_db()
 
@@ -75,7 +75,9 @@ def _get_network_info_darwin(info):
     out = _run_cmd(["ifconfig", "en0"])
     for line in out.splitlines():
         if "ether" in line:
-            info["MAC Address"] = line.strip().split()[1]
+            parts = line.strip().split()
+            if len(parts) > 1:
+                info["MAC Address"] = parts[1]
         if "inet " in line and "netmask" in line:
             parts = line.strip().split()
             mask_idx = parts.index("netmask") if "netmask" in parts else -1
@@ -107,7 +109,10 @@ def _get_network_info_linux(info):
     dns_servers = []
     for line in out.splitlines():
         if line.strip().startswith("nameserver"):
-            server = line.strip().split()[1]
+            parts = line.strip().split()
+            if len(parts) < 2:
+                continue
+            server = parts[1]
             if server not in dns_servers:
                 dns_servers.append(server)
             if len(dns_servers) >= 3:
@@ -125,10 +130,12 @@ def _get_network_info_linux(info):
     for line in out.splitlines():
         if "inet " in line and "127.0.0.1" not in line:
             parts = line.strip().split()
-            if "/" in parts[1]:
-                cidr = int(parts[1].split("/")[1])
-                mask = ".".join(str((0xFFFFFFFF << (32 - cidr) >> i) & 0xFF) for i in [24, 16, 8, 0])
-                info["Subnet Mask"] = mask
+            if len(parts) > 1 and "/" in parts[1]:
+                cidr_parts = parts[1].split("/")
+                if len(cidr_parts) > 1 and cidr_parts[1].isdigit():
+                    cidr = int(cidr_parts[1])
+                    mask = ".".join(str((0xFFFFFFFF << (32 - cidr) >> i) & 0xFF) for i in [24, 16, 8, 0])
+                    info["Subnet Mask"] = mask
             break
 
     out = _run_cmd(["iwconfig"])
@@ -186,14 +193,19 @@ def get_network_info():
     except Exception:
         info["Local IP"] = "N/A"
 
-    # Platform-specific details
+    # Platform-specific details. Each parser walks shell output that can vary
+    # by OS version, locale, VPN state, etc. — swallow parser errors so a
+    # malformed line never breaks the Network Info tab.
     system = platform.system()
-    if system == "Darwin":
-        _get_network_info_darwin(info)
-    elif system == "Linux":
-        _get_network_info_linux(info)
-    elif system == "Windows":
-        _get_network_info_windows(info)
+    try:
+        if system == "Darwin":
+            _get_network_info_darwin(info)
+        elif system == "Linux":
+            _get_network_info_linux(info)
+        elif system == "Windows":
+            _get_network_info_windows(info)
+    except Exception:
+        pass
 
     # Defaults for missing keys
     for key in ["WiFi Network (SSID)", "Signal Strength", "Link Speed", "Channel",
@@ -217,6 +229,53 @@ def get_network_info():
 # ──────────────────────────────────────────────
 
 SUSPICIOUS_PORTS = {4444, 31337, 1337, 5555, 6666, 6667, 12345, 54321}
+
+# Per-attack-type explanations shown in the Alerts tab "Investigate" drill-down.
+# Each entry: (why this gets flagged, what an analyst should do about it).
+ATTACK_PLAYBOOK = {
+    "Port Scan": (
+        "The same source IP probed 15+ distinct ports within 60 seconds — "
+        "classic reconnaissance pattern before an exploit attempt.",
+        "Block the source IP at the firewall. Enable SYN cookies on exposed servers. "
+        "Rate-limit incoming SYN packets per source.",
+    ),
+    "Ping of Death": (
+        "An ICMP packet larger than 1000 bytes was observed. Modern stacks survive it, "
+        "but oversized ICMP is almost always malicious or misconfigured.",
+        "Block oversized ICMP packets at the perimeter. Drop fragmented ICMP. "
+        "Restrict ICMP echo requests to trusted ranges.",
+    ),
+    "Data Exfiltration": (
+        "A large packet (>1000 bytes) was sent to or from a known backdoor port "
+        "(4444, 31337, etc). Strong indicator of data being smuggled out.",
+        "Block outbound traffic to those ports immediately. Inspect the source host "
+        "for compromise. Review DLP logs for the affected timeframe.",
+    ),
+    "Suspicious Port": (
+        "Traffic was seen on a port commonly used by malware C2 channels "
+        "(Metasploit default 4444, IRC bots, RATs).",
+        "Block the port at the firewall. Audit the host for unexpected listeners "
+        "with `lsof -i` / `netstat -anp`.",
+    ),
+    "DNS Anomaly": (
+        "A DNS (UDP/53) packet exceeded 200 bytes. DNS queries are normally tiny — "
+        "oversized ones suggest DNS tunneling (data smuggled inside DNS records).",
+        "Inspect DNS query payloads. Force DNS through a filtering resolver "
+        "(Cloudflare 1.1.1.2, Quad9). Alert on TXT-record floods.",
+    ),
+    "Large Transfer": (
+        "A single packet exceeded 5000 bytes — well above normal MTU. "
+        "Often signals bulk data movement or a misconfigured client.",
+        "Investigate whether the transfer is authorized. Set per-host bandwidth "
+        "thresholds. Review file-share access logs for the source.",
+    ),
+    "Unknown Anomaly": (
+        "The ML model flagged this packet as statistically unusual, but it didn't "
+        "match a known signature. Could be a novel attack or benign edge case.",
+        "Manually review the source IP, destination, and timing. If similar packets "
+        "repeat, consider adding a custom rule. If clearly benign, mark as false positive.",
+    ),
+}
 
 def classify_attack(row):
     if row.get("status") != "ANOMALY":
@@ -350,19 +409,24 @@ def generate_pdf_report(df, anomaly_df):
     pdf.set_text_color(29, 29, 31)
     pdf.set_font("Helvetica", "", 11)
     pdf.ln(3)
+    def _safe_nunique(col):
+        if n_anom == 0 or col not in anomaly_df.columns:
+            return 0
+        return anomaly_df[col].nunique()
+
     summary_items = [
         f"Total Packets Analyzed: {total:,}",
         f"Normal Traffic: {total - n_anom:,} ({100-pct:.1f}%)",
         f"Anomalies Detected: {n_anom:,} ({pct:.1f}%)",
-        f"Unique Attack Types: {anomaly_df['attack_type'].nunique() if n_anom > 0 else 0}",
-        f"Unique Source IPs (Attackers): {anomaly_df['src_ip'].nunique() if n_anom > 0 else 0}",
-        f"Unique Destination IPs (Targets): {anomaly_df['dst_ip'].nunique() if n_anom > 0 else 0}",
+        f"Unique Attack Types: {_safe_nunique('attack_type')}",
+        f"Unique Source IPs (Attackers): {_safe_nunique('src_ip')}",
+        f"Unique Destination IPs (Targets): {_safe_nunique('dst_ip')}",
     ]
     for item in summary_items:
         pdf.cell(0, 7, f"  {item}", new_x="LMARGIN", new_y="NEXT")
 
     # Attack Breakdown
-    if n_anom > 0:
+    if n_anom > 0 and "attack_type" in anomaly_df.columns:
         pdf.ln(8)
         pdf.set_font("Helvetica", "B", 16)
         pdf.cell(0, 12, "Attack Type Breakdown", new_x="LMARGIN", new_y="NEXT")
@@ -396,28 +460,32 @@ def generate_pdf_report(df, anomaly_df):
             pdf.ln()
 
         # Top Attackers
-        pdf.ln(8)
-        pdf.set_font("Helvetica", "B", 16)
-        pdf.cell(0, 12, "Top Suspicious IPs", new_x="LMARGIN", new_y="NEXT")
-        pdf.set_draw_color(210, 210, 215)
-        pdf.line(10, pdf.get_y(), 200, pdf.get_y())
-        pdf.ln(5)
+        if "src_ip" in anomaly_df.columns:
+            pdf.ln(8)
+            pdf.set_font("Helvetica", "B", 16)
+            pdf.cell(0, 12, "Top Suspicious IPs", new_x="LMARGIN", new_y="NEXT")
+            pdf.set_draw_color(210, 210, 215)
+            pdf.line(10, pdf.get_y(), 200, pdf.get_y())
+            pdf.ln(5)
 
-        top_src = anomaly_df["src_ip"].value_counts().head(10)
-        pdf.set_font("Helvetica", "B", 10)
-        pdf.set_fill_color(245, 245, 247)
-        pdf.cell(50, 8, "Source IP", border=1, fill=True)
-        pdf.cell(30, 8, "Attacks", border=1, fill=True, align="C")
-        pdf.cell(110, 8, "Attack Types", border=1, fill=True)
-        pdf.ln()
-
-        pdf.set_font("Helvetica", "", 10)
-        for ip, cnt in top_src.items():
-            types = ", ".join(anomaly_df[anomaly_df["src_ip"] == ip]["attack_type"].unique())
-            pdf.cell(50, 7, str(ip), border=1)
-            pdf.cell(30, 7, str(cnt), border=1, align="C")
-            pdf.cell(110, 7, types[:50], border=1)
+            top_src = anomaly_df["src_ip"].value_counts().head(10)
+            pdf.set_font("Helvetica", "B", 10)
+            pdf.set_fill_color(245, 245, 247)
+            pdf.cell(50, 8, "Source IP", border=1, fill=True)
+            pdf.cell(30, 8, "Attacks", border=1, fill=True, align="C")
+            pdf.cell(110, 8, "Attack Types", border=1, fill=True)
             pdf.ln()
+
+            pdf.set_font("Helvetica", "", 10)
+            for ip, cnt in top_src.items():
+                if "attack_type" in anomaly_df.columns:
+                    types = ", ".join(anomaly_df[anomaly_df["src_ip"] == ip]["attack_type"].unique())
+                else:
+                    types = ""
+                pdf.cell(50, 7, str(ip), border=1)
+                pdf.cell(30, 7, str(cnt), border=1, align="C")
+                pdf.cell(110, 7, types[:50], border=1)
+                pdf.ln()
 
     # Recommendations
     pdf.add_page()
@@ -430,7 +498,7 @@ def generate_pdf_report(df, anomaly_df):
     pdf.set_font("Helvetica", "", 11)
     recommendations = []
     if n_anom > 0:
-        attack_types = set(anomaly_df["attack_type"].unique())
+        attack_types = set(anomaly_df["attack_type"].unique()) if "attack_type" in anomaly_df.columns else set()
         if "Port Scan" in attack_types:
             recommendations.append("Port Scan Detected: Configure firewall rules to limit SYN packet rates. Enable SYN cookies on servers.")
         if "Ping of Death" in attack_types:
@@ -465,7 +533,7 @@ def generate_pdf_report(df, anomaly_df):
 # Page Config
 # ──────────────────────────────────────────────
 
-st.set_page_config(page_title="NetWatchAI", layout="wide")
+st.set_page_config(page_title="NetWatchAI", layout="wide", initial_sidebar_state="expanded")
 
 # ──────────────────────────────────────────────
 # Authentication
@@ -478,8 +546,33 @@ if "authenticated" not in st.session_state:
 # explicitly configured a password — either via NETWATCHAI_PASSWORD env var
 # (recommended for any public/server deploy) or by setting one in the UI.
 # On a fresh local install with no password set, the dashboard opens directly.
-_auth_enabled = auth.is_setup()
+# Setting NETWATCHAI_DEMO=1 bypasses auth entirely (used for the public demo).
+_demo_mode = os.environ.get("NETWATCHAI_DEMO") == "1"
+_auth_enabled = auth.is_setup() and not _demo_mode
 _needs_setup = False  # "Create password" screen is opt-in via Settings, not forced on first run.
+
+# Handle GitHub OAuth callback if the URL carries ?code=...&state=...
+# Runs before the login form renders so a successful redirect lands directly in the app.
+if _auth_enabled and not st.session_state.authenticated and oauth_github.is_configured():
+    _qp_code = st.query_params.get("code")
+    _qp_state = st.query_params.get("state")
+    if _qp_code and _qp_state:
+        try:
+            user = oauth_github.exchange_code(
+                code=_qp_code,
+                state=_qp_state,
+                expected_state=st.session_state.get("oauth_state", ""),
+            )
+            st.session_state.authenticated = True
+            st.session_state.login_time = datetime.now()
+            st.session_state.github_user = user
+            storage.log_audit(f"github:{user['login']}", "login", "oauth_success")
+            st.query_params.clear()
+            st.rerun()
+        except Exception as _oauth_err:
+            storage.log_audit("user", "login", f"oauth_failed: {_oauth_err}")
+            st.error(f"GitHub sign-in failed: {_oauth_err}")
+            st.query_params.clear()
 
 if _auth_enabled and not st.session_state.authenticated:
     st.markdown("""
@@ -641,6 +734,25 @@ if _auth_enabled and not st.session_state.authenticated:
                         storage.log_audit("user", "login", "failed")
                         st.error("Invalid password.")
 
+            st.markdown(
+                "<p style='text-align:center;color:#71717a;font-size:0.8rem;margin:1rem 0 0.5rem;'>or</p>",
+                unsafe_allow_html=True,
+            )
+            if oauth_github.is_configured():
+                # Fresh state per render so the CSRF check stays meaningful across visits.
+                if "oauth_state" not in st.session_state:
+                    st.session_state["oauth_state"] = oauth_github.make_state()
+                st.link_button(
+                    "Sign in with GitHub",
+                    oauth_github.authorize_url(st.session_state["oauth_state"]),
+                    use_container_width=True,
+                )
+            if st.button("Try Demo (no password)", key="try_demo_btn", use_container_width=True):
+                st.session_state.authenticated = True
+                st.session_state.login_time = datetime.now()
+                storage.log_audit("user", "login", "demo")
+                st.rerun()
+
             with st.expander("Forgot password?"):
                 st.caption(
                     "Clicking Reset will erase your stored password. "
@@ -710,7 +822,10 @@ st.markdown("""
         background-attachment: fixed;
     }
 
-    #MainMenu, footer, header { visibility: hidden; }
+    #MainMenu, footer { visibility: hidden; }
+    /* Keep header transparent (so the sidebar collapse arrow stays clickable)
+       but hide its background and the deploy button. */
+    header[data-testid="stHeader"] { background: transparent !important; }
     .stDeployButton { display: none; }
 
     .stApp, .stApp p, .stApp span, .stApp div, .stApp label { color: var(--text); }
@@ -1140,7 +1255,13 @@ st.markdown("""
 if not os.path.exists(MODEL_PATH):
     from src.model import train_model
     with st.spinner("Training AI model for the first time..."):
-        train_model()
+        try:
+            train_model()
+        except Exception as e:
+            st.error(
+                f"Model training failed: {e}. "
+                "The dashboard will continue with detection disabled until the model is trained successfully."
+            )
 
 # ──────────────────────────────────────────────
 # Load Data
@@ -1153,6 +1274,24 @@ def load_packet_data():
     elif os.path.exists(SAMPLE_CSV):
         return pd.read_csv(SAMPLE_CSV), "Sample Data"
     return None, "No Data"
+
+
+# Short-TTL caches for SQLite reads that re-fire on every Streamlit rerun.
+# `st.rerun()` (called from FP/allowlist/explain buttons) invalidates these,
+# so user-driven mutations stay consistent.
+@st.cache_data(ttl=5)
+def _cached_list_alerts(days: int, include_fp: bool):
+    return storage.list_alerts(days=days, include_fp=include_fp)
+
+
+@st.cache_data(ttl=10)
+def _cached_list_allowlist():
+    return storage.list_allowlist()
+
+
+@st.cache_data(ttl=10)
+def _cached_list_audit(limit: int):
+    return storage.list_audit(limit=limit)
 
 def run_detection(df):
     if not os.path.exists(MODEL_PATH):
@@ -1188,7 +1327,7 @@ if "src_ip" in df.columns:
         df.loc[_hit_mask, "status"] = "ANOMALY"
 
 # Apply allowlist: any src_ip on the allowlist is reclassified as Normal.
-_allowlisted_ips = {row["ip"] for row in storage.list_allowlist()}
+_allowlisted_ips = {row["ip"] for row in _cached_list_allowlist()}
 if _allowlisted_ips and "src_ip" in df.columns:
     _mask = df["src_ip"].isin(_allowlisted_ips)
     df.loc[_mask, "prediction"] = 1
@@ -1451,6 +1590,42 @@ with tab1:
         alert_cols = ["timestamp", "src_ip", "dst_ip", "protocol", "src_port", "dst_port", "packet_size", "flags", "attack_type"]
         st.dataframe(anomaly_df[[c for c in alert_cols if c in anomaly_df.columns]], use_container_width=True, hide_index=True)
 
+        st.markdown("<div style='height:1.25rem'></div>", unsafe_allow_html=True)
+        st.markdown(
+            "<div style='font-size:0.95rem;font-weight:600;color:#fafafa;margin-bottom:0.5rem;'>"
+            "Investigate — why was each threat flagged, and what to do</div>",
+            unsafe_allow_html=True,
+        )
+        attack_counts = anomaly_df["attack_type"].value_counts()
+        for atk_type, count in attack_counts.items():
+            why, action = ATTACK_PLAYBOOK.get(
+                atk_type,
+                ("This event was flagged as anomalous by the ML model.",
+                 "Manually review the source IP, destination, and timing."),
+            )
+            sources = anomaly_df[anomaly_df["attack_type"] == atk_type]["src_ip"].unique()
+            sources_str = ", ".join(sources[:5]) + (f" and {len(sources) - 5} more" if len(sources) > 5 else "")
+            with st.expander(f"{atk_type} — {count} event(s)", expanded=False):
+                st.markdown(
+                    f"<div style='margin-bottom:0.75rem;'>"
+                    f"<span style='color:#a1a1aa;font-size:0.8rem;'>Source IP(s):</span> "
+                    f"<span style='font-family:JetBrains Mono,monospace;font-size:0.85rem;color:#fafafa;'>"
+                    f"{sources_str}</span></div>",
+                    unsafe_allow_html=True,
+                )
+                st.markdown(
+                    f"<div style='margin-bottom:0.5rem;'>"
+                    f"<span style='color:#a1a1aa;font-size:0.8rem;font-weight:600;'>WHY THIS WAS FLAGGED</span><br>"
+                    f"<span style='color:#e4e4e7;font-size:0.9rem;line-height:1.5;'>{why}</span></div>",
+                    unsafe_allow_html=True,
+                )
+                st.markdown(
+                    f"<div>"
+                    f"<span style='color:#a1a1aa;font-size:0.8rem;font-weight:600;'>RECOMMENDED ACTION</span><br>"
+                    f"<span style='color:#e4e4e7;font-size:0.9rem;line-height:1.5;'>{action}</span></div>",
+                    unsafe_allow_html=True,
+                )
+
     # Spacer prevents the dataframe's hover toolbar tooltip ("Rearrange columns",
     # "Search", "Download") from visually overlapping the expander title below.
     st.markdown("<div style='height:1.75rem'></div>", unsafe_allow_html=True)
@@ -1458,10 +1633,14 @@ with tab1:
     # Review persisted alerts: mark as false positive or allowlist.
     with st.expander("Manage alerts (mark false positives, add to allowlist)", expanded=False):
         st.caption(
-            "This list shows threats NetWatchAI has saved to its database over the last 7 days. "
-            "Click 'False positive' to suppress a wrong alert, or 'Allowlist' to trust the source IP forever."
+            "Threats NetWatchAI has saved to its database. "
+            "Click 'Explain' for an AI breakdown, 'False positive' to suppress, or 'Allowlist' to trust the source IP."
         )
-        stored = storage.list_alerts(days=7, include_fp=False)
+        days_window = st.selectbox(
+            "Look back", options=[7, 30, 90, 365], index=1,
+            format_func=lambda d: f"{d} days", key="manage_alerts_days",
+        )
+        stored = _cached_list_alerts(days=days_window, include_fp=False)
         if not stored:
             st.info(
                 "Nothing to review yet. New threats will appear here after they're detected. "
@@ -1470,8 +1649,13 @@ with tab1:
             )
         else:
             st.caption(f"Showing {len(stored)} saved alert(s).")
+            ai_ready = ai_explainer.is_configured()
+            if not ai_ready:
+                st.caption(
+                    "_Set `ANTHROPIC_API_KEY` in your environment to enable per-alert AI explanations._"
+                )
             for alert in stored[:25]:
-                c1, c2, c3, c4 = st.columns([4, 2, 1.2, 1.2])
+                c1, c2, c3, c4, c5 = st.columns([3.4, 1.8, 1.0, 1.2, 1.2])
                 with c1:
                     st.markdown(
                         f"<div style='font-size:0.85rem;'>"
@@ -1489,15 +1673,33 @@ with tab1:
                         unsafe_allow_html=True,
                     )
                 with c3:
+                    if st.button("Explain", key=f"ex_{alert['id']}", disabled=not ai_ready,
+                                 help="Ask Claude to explain this alert" if ai_ready else "Set ANTHROPIC_API_KEY"):
+                        st.session_state[f"explain_open_{alert['id']}"] = True
+                with c4:
                     if st.button("False positive", key=f"fp_{alert['id']}"):
                         storage.mark_false_positive(alert["id"])
                         storage.log_audit("user", "mark_fp", f"alert_id={alert['id']}")
+                        _cached_list_alerts.clear()
+                        _cached_list_audit.clear()
                         st.rerun()
-                with c4:
+                with c5:
                     if st.button("Allowlist", key=f"al_{alert['id']}"):
                         storage.add_allowlist(alert["src_ip"], note=f"from alert {alert['id']}")
                         storage.log_audit("user", "allowlist_add", alert["src_ip"])
+                        _cached_list_allowlist.clear()
+                        _cached_list_audit.clear()
                         st.rerun()
+
+                if st.session_state.get(f"explain_open_{alert['id']}"):
+                    with st.expander("AI explanation", expanded=True):
+                        try:
+                            with st.spinner("Asking Claude..."):
+                                result = ai_explainer.explain(alert)
+                            st.markdown(result["explanation"])
+                            st.caption(f"_Model: {result['model']} &middot; {result['source']}_")
+                        except Exception as e:
+                            st.error(f"Explanation failed: {e}")
 
     st.markdown("---")
     st.markdown(f"""<div class="sec-h"><h3>Packet Log ({len(filtered_df):,} of {len(df):,})</h3></div>""", unsafe_allow_html=True)
@@ -1513,7 +1715,38 @@ with tab1:
         start = (page - 1) * PAGE_SIZE
         end = min(start + PAGE_SIZE, len(filtered_df))
         st.caption(f"Showing {start+1}–{end} of {len(filtered_df):,} packets (page {page}/{total_pages})")
-        st.dataframe(filtered_df[avail].iloc[start:end].reset_index(drop=True), use_container_width=True, hide_index=True, height=400)
+        page_df = filtered_df[avail].iloc[start:end].reset_index(drop=True)
+        st.dataframe(page_df, use_container_width=True, hide_index=True, height=400)
+
+        # Per-packet AI explainer. Pick a row from the current page and ask Claude to break it down.
+        ai_ready = ai_explainer.is_configured()
+        pc1, pc2 = st.columns([1, 5])
+        with pc1:
+            row_pick = st.number_input(
+                "Explain row #", min_value=1, max_value=len(page_df),
+                value=1, step=1, key=f"packet_explain_row_{page}",
+                disabled=not ai_ready,
+            )
+        with pc2:
+            if st.button("Explain packet", key=f"packet_explain_btn_{page}",
+                         disabled=not ai_ready,
+                         help="Ask Claude what this packet might mean" if ai_ready else "Set ANTHROPIC_API_KEY"):
+                st.session_state[f"packet_explain_open_{page}"] = int(row_pick)
+        if not ai_ready:
+            st.caption("_Set `ANTHROPIC_API_KEY` to enable per-packet AI explanations._")
+
+        opened_row = st.session_state.get(f"packet_explain_open_{page}")
+        if opened_row:
+            packet = page_df.iloc[opened_row - 1].to_dict()
+            packet["ts"] = packet.get("timestamp")
+            with st.expander(f"AI explanation — row {opened_row}", expanded=True):
+                try:
+                    with st.spinner("Asking Claude..."):
+                        result = ai_explainer.explain(packet, use_cache=False)
+                    st.markdown(result["explanation"])
+                    st.caption(f"_Model: {result['model']} &middot; {result['source']}_")
+                except Exception as e:
+                    st.error(f"Explanation failed: {e}")
 
 # ── Tab 2: Attack Types ───────────────────────
 
@@ -1871,7 +2104,7 @@ with tab_settings:
     st.markdown("""<div class="sec-h"><h3>Allowlist</h3></div>""", unsafe_allow_html=True)
     st.caption("IPs here will never trigger an anomaly. Useful for internal scanners and monitoring tools.")
 
-    allow = storage.list_allowlist()
+    allow = _cached_list_allowlist()
     with st.form("allow_form", clear_on_submit=True):
         col_x, col_y, col_z = st.columns([2, 3, 1])
         with col_x:
@@ -1884,6 +2117,8 @@ with tab_settings:
                 if new_ip.strip():
                     storage.add_allowlist(new_ip.strip(), new_note.strip())
                     storage.log_audit("user", "allowlist_add", new_ip.strip())
+                    _cached_list_allowlist.clear()
+                    _cached_list_audit.clear()
                     st.rerun()
 
     if allow:
@@ -1903,6 +2138,8 @@ with tab_settings:
                 if st.button("Remove", key=f"rm_{item['ip']}"):
                     storage.remove_allowlist(item["ip"])
                     storage.log_audit("user", "allowlist_remove", item["ip"])
+                    _cached_list_allowlist.clear()
+                    _cached_list_audit.clear()
                     st.rerun()
     else:
         st.caption("No allowlisted IPs yet.")
@@ -2038,7 +2275,27 @@ with tab_settings:
 
     st.markdown("---")
     st.markdown("""<div class="sec-h"><h3>Audit Log</h3></div>""", unsafe_allow_html=True)
-    audit_rows = storage.list_audit(limit=50)
+    st.caption(
+        "Tamper-evident — every row is SHA-256-chained to the previous one. "
+        "Use the verify button to prove the log hasn't been edited."
+    )
+    av1, av2 = st.columns([1, 3])
+    with av1:
+        if st.button("Verify chain integrity", key="audit_verify_btn"):
+            st.session_state["audit_verify_result"] = storage.verify_audit_chain()
+    with av2:
+        _v = st.session_state.get("audit_verify_result")
+        if _v is None:
+            st.caption("_Not yet verified this session._")
+        elif _v["ok"]:
+            st.success(f"Chain intact ({_v['total']} rows).")
+        else:
+            st.error(
+                f"Tampering detected at row id={_v['first_broken_id']} ({_v.get('reason','?')}). "
+                f"Total rows: {_v['total']}."
+            )
+
+    audit_rows = _cached_list_audit(limit=50)
     if audit_rows:
         audit_df = pd.DataFrame(audit_rows)[["ts", "actor", "action", "detail"]]
         st.dataframe(audit_df, use_container_width=True, hide_index=True, height=280)

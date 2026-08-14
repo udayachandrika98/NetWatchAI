@@ -4,9 +4,60 @@ services:
     container_name: netwatchai
     ports:
       - "8501:8501"
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GITHUB_OAUTH_CLIENT_ID=${GITHUB_OAUTH_CLIENT_ID:-}
+      - GITHUB_OAUTH_CLIENT_SECRET=${GITHUB_OAUTH_CLIENT_SECRET:-}
+      - GITHUB_OAUTH_REDIRECT_URI=${GITHUB_OAUTH_REDIRECT_URI:-}
+      - ALLOWED_GITHUB_USERS=${ALLOWED_GITHUB_USERS:-}
     volumes:
       - ./data:/app/data
     restart: unless-stopped
+
+  exporter:
+    build: .
+    container_name: netwatchai-exporter
+    command: ["python", "-m", "src.metrics_exporter"]
+    ports:
+      - "9100:9100"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9100/metrics"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: netwatchai-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    restart: unless-stopped
+    depends_on:
+      - exporter
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: netwatchai-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_UNIFIED_ALERTING_ENABLED=true
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    restart: unless-stopped
+    depends_on:
+      - prometheus
 
   # Optional: Run live packet capture (requires elevated privileges)
   # Uncomment and run: docker compose up capture
@@ -21,3 +72,7 @@ services:
   #     - ./data:/app/data
   #   command: ["python", "capture.py", "--count", "0", "--detect"]
   #   restart: unless-stopped
+
+volumes:
+  prometheus-data:
+  grafana-data:

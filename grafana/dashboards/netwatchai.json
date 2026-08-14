@@ -1,0 +1,152 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "uid": "netwatchai",
+  "title": "NetWatchAI Overview",
+  "tags": ["netwatchai", "ids", "security"],
+  "timezone": "browser",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "30s",
+  "time": {"from": "now-24h", "to": "now"},
+  "templating": {"list": []},
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Open Alerts",
+      "id": 1,
+      "gridPos": {"x": 0, "y": 0, "w": 6, "h": 4},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "colorMode": "background",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 5},
+              {"color": "red", "value": 25}
+            ]
+          }
+        }
+      },
+      "targets": [
+        {"expr": "netwatchai_alerts_open", "refId": "A"}
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Alerts (24h)",
+      "id": 2,
+      "gridPos": {"x": 6, "y": 0, "w": 6, "h": 4},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "colorMode": "value"
+      },
+      "targets": [
+        {"expr": "sum(netwatchai_alerts_last_24h)", "refId": "A"}
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "False Positives",
+      "id": 3,
+      "gridPos": {"x": 12, "y": 0, "w": 6, "h": 4},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "colorMode": "value"
+      },
+      "targets": [
+        {"expr": "netwatchai_alerts_false_positive_total", "refId": "A"}
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Allowlist Size",
+      "id": 4,
+      "gridPos": {"x": 18, "y": 0, "w": 6, "h": 4},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "colorMode": "value"
+      },
+      "targets": [
+        {"expr": "netwatchai_allowlist_size", "refId": "A"}
+      ]
+    },
+    {
+      "type": "piechart",
+      "title": "Attack Types (24h)",
+      "id": 5,
+      "gridPos": {"x": 0, "y": 4, "w": 12, "h": 9},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "options": {
+        "legend": {"displayMode": "table", "placement": "right", "values": ["value", "percent"]},
+        "pieType": "donut",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}
+      },
+      "targets": [
+        {"expr": "netwatchai_alerts_last_24h", "legendFormat": "{{attack_type}}", "refId": "A"}
+      ]
+    },
+    {
+      "type": "bargauge",
+      "title": "Top Source IPs (24h)",
+      "id": 6,
+      "gridPos": {"x": 12, "y": 4, "w": 12, "h": 9},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "showUnfilled": true
+      },
+      "targets": [
+        {"expr": "topk(10, netwatchai_top_src_ip_alerts_24h)", "legendFormat": "{{src_ip}}", "refId": "A"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Alerts Over Time (rate / 5m)",
+      "id": 7,
+      "gridPos": {"x": 0, "y": 13, "w": 24, "h": 9},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 15, "stacking": {"mode": "normal"}}
+        }
+      },
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}},
+      "targets": [
+        {"expr": "max by (attack_type) (increase(netwatchai_alerts_total[5m]))", "legendFormat": "{{attack_type}}", "refId": "A"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Exporter / DB Health",
+      "id": 8,
+      "gridPos": {"x": 0, "y": 22, "w": 24, "h": 6},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 1,
+          "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 20}
+        }
+      },
+      "targets": [
+        {"expr": "netwatchai_db_up", "legendFormat": "db_up", "refId": "A"},
+        {"expr": "up{job=\"netwatchai\"}", "legendFormat": "exporter_up", "refId": "B"}
+      ]
+    }
+  ]
+}
